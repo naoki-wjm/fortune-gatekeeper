@@ -19,7 +19,7 @@
   "kv_namespaces": [
     {
       "binding": "ASTRO_KV",
-      "id": "PLACEHOLDER-deploy-前に-id-差し替え"
+      "id": "7a7079626493440493fb718744511d80"
     }
   ],
   // 出生の原本（progressions＝二次進行だけが読む）は Secret で渡す。設定ファイルには書かない。
