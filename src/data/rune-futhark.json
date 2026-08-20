@@ -1,0 +1,107 @@
+{
+  "id": "rune",
+  "name": "ルーン（エルダーフサルク）",
+  "has_reversed": "mixed",
+  "cards": [
+    {
+      "name": "フェオ",
+      "has_reversed": true
+    },
+    {
+      "name": "ウル",
+      "has_reversed": true
+    },
+    {
+      "name": "ソーン",
+      "has_reversed": true
+    },
+    {
+      "name": "アンスール",
+      "has_reversed": true
+    },
+    {
+      "name": "ラド",
+      "has_reversed": true
+    },
+    {
+      "name": "ケン",
+      "has_reversed": true
+    },
+    {
+      "name": "ギューフ",
+      "has_reversed": false
+    },
+    {
+      "name": "ウィン",
+      "has_reversed": true
+    },
+    {
+      "name": "ハガル",
+      "has_reversed": false
+    },
+    {
+      "name": "ニイド",
+      "has_reversed": true
+    },
+    {
+      "name": "イス",
+      "has_reversed": false
+    },
+    {
+      "name": "ヤラ",
+      "has_reversed": false
+    },
+    {
+      "name": "ユル",
+      "has_reversed": false
+    },
+    {
+      "name": "ぺオース",
+      "has_reversed": true
+    },
+    {
+      "name": "エオロー",
+      "has_reversed": true
+    },
+    {
+      "name": "シゲル",
+      "has_reversed": false
+    },
+    {
+      "name": "ティール",
+      "has_reversed": true
+    },
+    {
+      "name": "ベオーク",
+      "has_reversed": true
+    },
+    {
+      "name": "エオー",
+      "has_reversed": true
+    },
+    {
+      "name": "マン",
+      "has_reversed": true
+    },
+    {
+      "name": "ラーグ",
+      "has_reversed": true
+    },
+    {
+      "name": "イング",
+      "has_reversed": false
+    },
+    {
+      "name": "オセル",
+      "has_reversed": true
+    },
+    {
+      "name": "ダエグ",
+      "has_reversed": false
+    },
+    {
+      "name": "ウィルド",
+      "has_reversed": false
+    }
+  ]
+}

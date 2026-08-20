@@ -1,0 +1,21 @@
+{
+  "name": "fortune-gatekeeper",
+  "version": "0.2.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "占いMCPサーバー（カード占い）。引くのはサーバー、読むのは Claude。",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "type-check": "tsc --noEmit",
+    "sync:decks": "node scripts/sync-decks.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260815.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.123.0"
+  }
+}

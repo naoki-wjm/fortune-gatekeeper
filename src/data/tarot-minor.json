@@ -1,0 +1,231 @@
+{
+  "id": "tarot_minor",
+  "name": "タロット小アルカナ",
+  "has_reversed": true,
+  "cards": [
+    {
+      "name": "ワンドのエース",
+      "name_en": "Ace of Wands"
+    },
+    {
+      "name": "ワンドの2",
+      "name_en": "Two of Wands"
+    },
+    {
+      "name": "ワンドの3",
+      "name_en": "Three of Wands"
+    },
+    {
+      "name": "ワンドの4",
+      "name_en": "Four of Wands"
+    },
+    {
+      "name": "ワンドの5",
+      "name_en": "Five of Wands"
+    },
+    {
+      "name": "ワンドの6",
+      "name_en": "Six of Wands"
+    },
+    {
+      "name": "ワンドの7",
+      "name_en": "Seven of Wands"
+    },
+    {
+      "name": "ワンドの8",
+      "name_en": "Eight of Wands"
+    },
+    {
+      "name": "ワンドの9",
+      "name_en": "Nine of Wands"
+    },
+    {
+      "name": "ワンドの10",
+      "name_en": "Ten of Wands"
+    },
+    {
+      "name": "ワンドのペイジ",
+      "name_en": "Page of Wands"
+    },
+    {
+      "name": "ワンドのナイト",
+      "name_en": "Knight of Wands"
+    },
+    {
+      "name": "ワンドのクイーン",
+      "name_en": "Queen of Wands"
+    },
+    {
+      "name": "ワンドのキング",
+      "name_en": "King of Wands"
+    },
+    {
+      "name": "カップのエース",
+      "name_en": "Ace of Cups"
+    },
+    {
+      "name": "カップの2",
+      "name_en": "Two of Cups"
+    },
+    {
+      "name": "カップの3",
+      "name_en": "Three of Cups"
+    },
+    {
+      "name": "カップの4",
+      "name_en": "Four of Cups"
+    },
+    {
+      "name": "カップの5",
+      "name_en": "Five of Cups"
+    },
+    {
+      "name": "カップの6",
+      "name_en": "Six of Cups"
+    },
+    {
+      "name": "カップの7",
+      "name_en": "Seven of Cups"
+    },
+    {
+      "name": "カップの8",
+      "name_en": "Eight of Cups"
+    },
+    {
+      "name": "カップの9",
+      "name_en": "Nine of Cups"
+    },
+    {
+      "name": "カップの10",
+      "name_en": "Ten of Cups"
+    },
+    {
+      "name": "カップのペイジ",
+      "name_en": "Page of Cups"
+    },
+    {
+      "name": "カップのナイト",
+      "name_en": "Knight of Cups"
+    },
+    {
+      "name": "カップのクイーン",
+      "name_en": "Queen of Cups"
+    },
+    {
+      "name": "カップのキング",
+      "name_en": "King of Cups"
+    },
+    {
+      "name": "ソードのエース",
+      "name_en": "Ace of Swords"
+    },
+    {
+      "name": "ソードの2",
+      "name_en": "Two of Swords"
+    },
+    {
+      "name": "ソードの3",
+      "name_en": "Three of Swords"
+    },
+    {
+      "name": "ソードの4",
+      "name_en": "Four of Swords"
+    },
+    {
+      "name": "ソードの5",
+      "name_en": "Five of Swords"
+    },
+    {
+      "name": "ソードの6",
+      "name_en": "Six of Swords"
+    },
+    {
+      "name": "ソードの7",
+      "name_en": "Seven of Swords"
+    },
+    {
+      "name": "ソードの8",
+      "name_en": "Eight of Swords"
+    },
+    {
+      "name": "ソードの9",
+      "name_en": "Nine of Swords"
+    },
+    {
+      "name": "ソードの10",
+      "name_en": "Ten of Swords"
+    },
+    {
+      "name": "ソードのペイジ",
+      "name_en": "Page of Swords"
+    },
+    {
+      "name": "ソードのナイト",
+      "name_en": "Knight of Swords"
+    },
+    {
+      "name": "ソードのクイーン",
+      "name_en": "Queen of Swords"
+    },
+    {
+      "name": "ソードのキング",
+      "name_en": "King of Swords"
+    },
+    {
+      "name": "ペンタクルのエース",
+      "name_en": "Ace of Pentacles"
+    },
+    {
+      "name": "ペンタクルの2",
+      "name_en": "Two of Pentacles"
+    },
+    {
+      "name": "ペンタクルの3",
+      "name_en": "Three of Pentacles"
+    },
+    {
+      "name": "ペンタクルの4",
+      "name_en": "Four of Pentacles"
+    },
+    {
+      "name": "ペンタクルの5",
+      "name_en": "Five of Pentacles"
+    },
+    {
+      "name": "ペンタクルの6",
+      "name_en": "Six of Pentacles"
+    },
+    {
+      "name": "ペンタクルの7",
+      "name_en": "Seven of Pentacles"
+    },
+    {
+      "name": "ペンタクルの8",
+      "name_en": "Eight of Pentacles"
+    },
+    {
+      "name": "ペンタクルの9",
+      "name_en": "Nine of Pentacles"
+    },
+    {
+      "name": "ペンタクルの10",
+      "name_en": "Ten of Pentacles"
+    },
+    {
+      "name": "ペンタクルのペイジ",
+      "name_en": "Page of Pentacles"
+    },
+    {
+      "name": "ペンタクルのナイト",
+      "name_en": "Knight of Pentacles"
+    },
+    {
+      "name": "ペンタクルのクイーン",
+      "name_en": "Queen of Pentacles"
+    },
+    {
+      "name": "ペンタクルのキング",
+      "name_en": "King of Pentacles"
+    }
+  ]
+}

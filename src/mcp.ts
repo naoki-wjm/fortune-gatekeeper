@@ -1,0 +1,461 @@
+/**
+ * MCP（Model Context Protocol）ハンドラ。
+ *
+ * ステートレスな Streamable HTTP：POST /mcp に JSON-RPC 2.0 の単発リクエストが来て、
+ * その場で application/json を返す。セッションを持たないので Mcp-Session-Id は発行せず、
+ * SSE ストリームも開かない。秘密も認証も無い（誰が呼んでも同じ答えが返る）。
+ */
+import packageJson from "../package.json";
+import { DECKS, DECK_IDS } from "./decks";
+import { SPREADS, SPREAD_IDS } from "./spreads";
+import { DrawError, drawCards, formatDrawResult, type DrawOptions } from "./draw";
+import {
+  CAST_METHOD_IDS,
+  CastError,
+  castHexagram,
+  formatCastResult,
+  type CastOptions,
+} from "./iching";
+
+/** serverInfo.name。占星術層（astro-mcp.ts）も同じ名前を名乗る */
+export const SERVER_NAME = "fortune-gatekeeper";
+export const SERVER_VERSION: string = packageJson.version;
+
+/** デッキごとに同梱物が違う理由（instructions・list_decks・draw_cards の3箇所で同じ線引きを言う） */
+const DECK_POLICY_NOTE =
+  "空オラクルとエニグマオラクルはこのサーバーの作者の自作オラクルデッキで、" +
+  "あなたの学習データには無いため一言と解説を同梱しています。" +
+  "タロットとルーンは広く知られた体系なのでカード名だけを返します——そちらはあなた自身の知識で読んでください。";
+
+/** initialize 応答に載せる、サーバー全体の注意書き（Claude が最初に読む一文） */
+const SERVER_INSTRUCTIONS =
+  "占い用のカードを「引く」だけのサーバーです。シャッフル・正逆・飛び出しはすべてサーバー側の乱数で決まり、" +
+  "解釈は一切しません——引いた結果の読み解きは会話中のあなたが行ってください。" +
+  "自分で「引いたふり」をせず、占う場面では必ず draw_cards を呼ぶこと。" +
+  "空オラクルは創作のお題出しにも使われ、題の形式は「カード名『メッセージ』」です。" +
+  DECK_POLICY_NOTE +
+  "カードのほかに易占（周易）も立てられます——cast_hexagram が六爻を乱数で出し、" +
+  "本卦・変爻・之卦・互卦を返します。卦辞・爻辞は載せていないので、そこもあなたの知識で読んでください。";
+
+/** 相手が名乗ってきたバージョンがこの中にあればそれに合わせる */
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
+
+/** ブラウザからも叩けるように全許可（守るべき API キーもコストも無い） */
+export const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Mcp-Protocol-Version",
+  "Access-Control-Max-Age": "86400",
+};
+
+export type JsonRpcId = string | number;
+
+interface JsonRpcMessage {
+  jsonrpc?: unknown;
+  id?: unknown;
+  method?: unknown;
+  params?: unknown;
+}
+
+export interface ToolContent {
+  type: "text";
+  text: string;
+}
+
+export interface ToolResult {
+  content: ToolContent[];
+  structuredContent?: unknown;
+  isError?: boolean;
+}
+
+/** JSON レスポンス（CORS 付き） */
+export function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+  });
+}
+
+/** JSON-RPC のエラー応答 */
+export function jsonRpcError(
+  id: JsonRpcId | null,
+  code: number,
+  message: string,
+  status = 200,
+): Response {
+  return jsonResponse({ jsonrpc: "2.0", id, error: { code, message } }, status);
+}
+
+export function jsonRpcResult(id: JsonRpcId, result: unknown): Response {
+  return jsonResponse({ jsonrpc: "2.0", id, result });
+}
+
+/** ツール実行の失敗は JSON-RPC エラーではなく isError で返す（MCP 仕様） */
+export function toolError(message: string): ToolResult {
+  return { content: [{ type: "text", text: `エラー: ${message}` }], isError: true };
+}
+
+// ---------------------------------------------------------------------------
+// ツール定義
+// ---------------------------------------------------------------------------
+
+const TOOLS = [
+  {
+    name: "list_decks",
+    title: "デッキとスプレッドの一覧",
+    description:
+      "引けるカードデッキ（空オラクル／エニグマオラクル／タロット大アルカナ／タロット78枚／ルーン）と、" +
+      "使えるスプレッド（並べ方）の一覧を返す。draw_cards を呼ぶ前に、どのデッキが" +
+      "意味テキストを持っているか・どのスプレッドが何枚引くかを確かめたいときに使う。",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "draw_cards",
+    title: "カードを引く",
+    description:
+      "カードを実際に引く（シャッフル・正逆・飛び出しはすべてサーバー側の乱数で決まる）。" +
+      "このツールは解釈をしない——引いた結果を返すだけなので、読み解きは呼び出した側で行うこと。\n" +
+      "デッキ: sky=空オラクル（16枚・正逆なし・意味テキストあり）、" +
+      "enigma=エニグマオラクル（32枚・正逆あり・意味テキストあり）、" +
+      "tarot=タロット大アルカナ（22枚・正逆あり・意味テキストなし）、" +
+      "tarot_full=タロット78枚（大アルカナ22＋小アルカナ56・正逆あり・意味テキストなし）、" +
+      "rune=ルーン エルダーフサルク（25枚・正逆はカードによる・意味テキストなし）。\n" +
+      "sky と enigma はこのサーバーの作者の自作オラクルデッキ（学習データに無い）なので一言＋解説を同梱、" +
+      "tarot と tarot_full と rune は広く知られた体系なのでカード名と正逆だけを返す——" +
+      "その3つは自分の知識で読むこと。\n" +
+      "空オラクルは小説のこぼれ話のお題出し係も兼ねていて、題の形式は「カード名『メッセージ』」。" +
+      "創作のお題として使うときはこの形を崩さないこと。\n" +
+      "spread を指定すると枚数はスプレッドに合わせて固定され、各札に位置（過去・現在・未来など）が付く。" +
+      "count と両方指定した場合は spread が優先される。" +
+      "「飛び出しカード」はシャッフル中に落ちた札の再現で、低い確率で 0〜3 枚付く（本引きとは別枠）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        deck: {
+          type: "string",
+          enum: DECK_IDS,
+          description:
+            "引くデッキ。sky / enigma / tarot（大アルカナ22枚） / tarot_full（78枚） / rune",
+        },
+        count: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "引く枚数（既定 1）。デッキの枚数を超えるとエラー。spread を指定した場合は無視される。",
+        },
+        spread: {
+          type: "string",
+          enum: SPREAD_IDS,
+          description:
+            "並べ方。single=1枚引き / two=2枚引き（Yes-No） / three=3枚引き（過去・現在・未来） / " +
+            "hexagram=ヘキサグラム（6枚） / celtic=ケルト十字（10枚） / horoscope=ホロスコープ（12枚）",
+        },
+        allow_reversed: {
+          type: "boolean",
+          default: true,
+          description:
+            "逆位置を許すか（既定 true）。false にすると全部正位置。もともと正逆の無いカードは常に正位置。",
+        },
+        jump_out: {
+          type: "boolean",
+          default: true,
+          description: "飛び出しカードを起こすか（既定 true）。false にすると必ず 0 枚。",
+        },
+      },
+      required: ["deck"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "cast_hexagram",
+    title: "易占で卦を立てる",
+    description:
+      "易占（周易）の卦を立てる（六爻はすべてサーバー側の乱数で決まる）。" +
+      "立てるのはサーバー、読むのは呼び出した側——卦辞・爻辞・彖伝のたぐいは一切返さないので、" +
+      "卦名と爻の並びを見て自分の知識で読むこと。\n" +
+      "method: coins=擲銭法（コイン3枚を6回投げる。6/7/8/9 が 1:3:3:1 で変爻が出やすい）、" +
+      "yarrow=本筮法（筮竹50本の三変を6回。老陰1/16・少陽5/16・少陰7/16・老陽3/16 という伝統的な偏り）、" +
+      "abridged=略筮法（筮竹で下卦・上卦・変爻を1回ずつ得る。変爻はちょうど1本）。既定は coins。\n" +
+      "返るのは本卦（序卦の番号・卦名・記号・上下の八卦）、六爻（初爻から上爻へ。老陽・老陰が変爻）、" +
+      "変爻の位、之卦（変爻が無ければ null）、互卦、それにコインの出目や筮竹の本数といった過程。\n" +
+      "自分で「立てたふり」をせず、易を立てる場面では必ずこのツールを呼ぶこと。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        method: {
+          type: "string",
+          enum: CAST_METHOD_IDS,
+          default: "coins",
+          description: "立て方。coins=擲銭法（既定） / yarrow=本筮法 / abridged=略筮法",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+];
+
+// ---------------------------------------------------------------------------
+// ツール実装
+// ---------------------------------------------------------------------------
+
+function reversedLabel(hasReversed: boolean | "mixed"): string {
+  if (hasReversed === "mixed") return "正逆はカードによる";
+  return hasReversed ? "正逆あり" : "正逆なし";
+}
+
+/**
+ * 意味テキスト欄の表示。解説（explanation）の有無は台帳の旗ではなく実データから見る
+ * （meanings/ の差し替えで解説が付いたり消えたりしても、案内文が嘘にならないように）。
+ */
+function meaningsLabel(deck: (typeof DECKS)[number]): string {
+  if (!deck.meanings_included) return "意味テキストなし（カード名のみ）";
+  const explained = deck.cards.some(
+    (card) => card.explanation !== undefined || card.explanation_upright !== undefined,
+  );
+  return explained ? "意味テキスト＋解説あり" : "意味テキストあり";
+}
+
+function runListDecks(): ToolResult {
+  const decks = DECKS.map((deck) => ({
+    id: deck.id,
+    name: deck.name,
+    card_count: deck.cards.length,
+    has_reversed: deck.has_reversed,
+    meanings_included: deck.meanings_included,
+  }));
+  const spreads = SPREADS.map((spread) => ({
+    id: spread.id,
+    name: spread.name,
+    count: spread.count,
+    positions: spread.positions,
+  }));
+
+  const lines: string[] = [`デッキ（${DECKS.length}種）`];
+  for (const deck of DECKS) {
+    const reversed = reversedLabel(deck.has_reversed);
+    lines.push(
+      `- ${deck.id}: ${deck.name} / ${deck.cards.length}枚 / ${reversed} / ${meaningsLabel(deck)}`,
+    );
+  }
+  lines.push("");
+  lines.push(`スプレッド（${spreads.length}種）`);
+  for (const spread of spreads) {
+    lines.push(
+      `- ${spread.id}: ${spread.name}（${spread.count}枚） ${spread.positions.join(" / ")}`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    "※ 空・エニグマは作者の自作デッキ（学習データに無い）のため一言＋解説を同梱。" +
+      "タロット・ルーンは既知の体系なのでカード名のみ。",
+  );
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: { decks, spreads },
+  };
+}
+
+/** draw_cards の引数を検算する（型だけ見る。値の妥当性は drawCards 側が見る） */
+function parseDrawArguments(raw: unknown): DrawOptions {
+  const args = (raw ?? {}) as Record<string, unknown>;
+
+  const deck = args["deck"];
+  if (typeof deck !== "string") {
+    throw new DrawError(`deck は必須です（${DECK_IDS.join(" / ")}）`);
+  }
+  const options: DrawOptions = { deck };
+
+  const spread = args["spread"];
+  if (spread !== undefined && spread !== null) {
+    if (typeof spread !== "string") {
+      throw new DrawError("spread は文字列で指定してください");
+    }
+    options.spread = spread;
+  }
+
+  const count = args["count"];
+  if (count !== undefined && count !== null) {
+    if (typeof count !== "number") {
+      throw new DrawError(`count は 1 以上の整数にしてください: ${JSON.stringify(count)}`);
+    }
+    options.count = count;
+  }
+
+  const allowReversed = args["allow_reversed"];
+  if (allowReversed !== undefined && allowReversed !== null) {
+    if (typeof allowReversed !== "boolean") {
+      throw new DrawError("allow_reversed は true / false で指定してください");
+    }
+    options.allow_reversed = allowReversed;
+  }
+
+  const jumpOut = args["jump_out"];
+  if (jumpOut !== undefined && jumpOut !== null) {
+    if (typeof jumpOut !== "boolean") {
+      throw new DrawError("jump_out は true / false で指定してください");
+    }
+    options.jump_out = jumpOut;
+  }
+
+  return options;
+}
+
+function runDrawCards(rawArguments: unknown): ToolResult {
+  const options = parseDrawArguments(rawArguments);
+  const result = drawCards(options);
+  return {
+    content: [{ type: "text", text: formatDrawResult(result) }],
+    structuredContent: result,
+  };
+}
+
+/** cast_hexagram の引数を検算する（型だけ見る。値の妥当性は castHexagram 側が見る） */
+function parseCastArguments(raw: unknown): CastOptions {
+  const args = (raw ?? {}) as Record<string, unknown>;
+  const options: CastOptions = {};
+
+  const method = args["method"];
+  if (method !== undefined && method !== null) {
+    if (typeof method !== "string") {
+      throw new CastError(`method は文字列で指定してください（${CAST_METHOD_IDS.join(" / ")}）`);
+    }
+    options.method = method;
+  }
+
+  return options;
+}
+
+function runCastHexagram(rawArguments: unknown): ToolResult {
+  const options = parseCastArguments(rawArguments);
+  const result = castHexagram(options);
+  return {
+    content: [{ type: "text", text: formatCastResult(result) }],
+    structuredContent: result,
+  };
+}
+
+function callTool(name: unknown, rawArguments: unknown): ToolResult {
+  try {
+    if (name === "list_decks") return runListDecks();
+    if (name === "draw_cards") return runDrawCards(rawArguments);
+    if (name === "cast_hexagram") return runCastHexagram(rawArguments);
+    return toolError(`知らないツールです: ${String(name)}`);
+  } catch (error) {
+    if (error instanceof DrawError || error instanceof CastError) return toolError(error.message);
+    return toolError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC ディスパッチ
+// ---------------------------------------------------------------------------
+
+export function negotiateProtocolVersion(params: unknown): string {
+  const requested = (params as { protocolVersion?: unknown } | undefined)?.protocolVersion;
+  if (typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) {
+    return requested;
+  }
+  return DEFAULT_PROTOCOL_VERSION;
+}
+
+/** 読めた 1 件のリクエスト */
+export interface JsonRpcRequest {
+  id: JsonRpcId;
+  method: string;
+  params: unknown;
+}
+
+/**
+ * POST の本文を JSON-RPC 2.0 の単発リクエストとして読む。
+ * 読めなかった場合（壊れた JSON・バッチ・id 無し・通知）は、そのまま返すべき Response を返す。
+ * カード層と占星術層で同じ読み方をするための共通部分。
+ */
+export async function readJsonRpcRequest(
+  request: Request,
+): Promise<{ ok: true; value: JsonRpcRequest } | { ok: false; response: Response }> {
+  let payload: unknown;
+  try {
+    payload = await request.json();
+  } catch {
+    return { ok: false, response: jsonRpcError(null, -32700, "JSON を解析できませんでした", 400) };
+  }
+
+  if (Array.isArray(payload)) {
+    return {
+      ok: false,
+      response: jsonRpcError(null, -32600, "バッチリクエストには対応していません", 400),
+    };
+  }
+  if (payload === null || typeof payload !== "object") {
+    return {
+      ok: false,
+      response: jsonRpcError(null, -32600, "JSON-RPC 2.0 のオブジェクトを送ってください", 400),
+    };
+  }
+
+  const message = payload as JsonRpcMessage;
+  const method = message.method;
+  if (typeof method !== "string") {
+    return { ok: false, response: jsonRpcError(null, -32600, "method がありません", 400) };
+  }
+
+  const rawId = message.id;
+  if (rawId === undefined || rawId === null) {
+    // 通知（notifications/initialized など）は受け取るだけ。本文は返さない
+    if (method.startsWith("notifications/")) {
+      return { ok: false, response: new Response(null, { status: 202, headers: { ...CORS_HEADERS } }) };
+    }
+    return {
+      ok: false,
+      response: jsonRpcError(null, -32600, `id の無いリクエストです: ${method}`, 400),
+    };
+  }
+  if (typeof rawId !== "string" && typeof rawId !== "number") {
+    return {
+      ok: false,
+      response: jsonRpcError(null, -32600, "id は文字列か数値にしてください", 400),
+    };
+  }
+
+  return { ok: true, value: { id: rawId, method, params: message.params } };
+}
+
+/** POST /mcp の本体 */
+export async function handleMcpRequest(request: Request): Promise<Response> {
+  const parsed = await readJsonRpcRequest(request);
+  if (!parsed.ok) return parsed.response;
+  const { id, method } = parsed.value;
+
+  switch (method) {
+    case "initialize":
+      return jsonRpcResult(id, {
+        protocolVersion: negotiateProtocolVersion(parsed.value.params),
+        capabilities: { tools: {} },
+        serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
+        instructions: SERVER_INSTRUCTIONS,
+      });
+
+    case "ping":
+      return jsonRpcResult(id, {});
+
+    case "tools/list":
+      return jsonRpcResult(id, { tools: TOOLS });
+
+    case "tools/call": {
+      const params = (parsed.value.params ?? {}) as { name?: unknown; arguments?: unknown };
+      return jsonRpcResult(id, callTool(params.name, params.arguments));
+    }
+
+    default:
+      return jsonRpcError(id, -32601, `知らないメソッドです: ${method}`);
+  }
+}

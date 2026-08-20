@@ -1,0 +1,1247 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import worker, { type Env } from "../src/index";
+import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
+import type { AuthContext } from "../src/astro/store";
+import { FakeKv } from "./stubs/fake-kv";
+import { makeFakeEngine, type FakeEngine } from "./stubs/fake-engine";
+
+const OWNER_KEY = "testkey123";
+const OWNER_RECORD = JSON.stringify({ user: "user1", name: "オーナー", role: "owner" });
+const OWNER: AuthContext = { user: "user1", name: "オーナー", role: "owner" };
+
+let kv: FakeKv;
+let engine: FakeEngine;
+let context: AstroContext;
+
+beforeEach(() => {
+  kv = new FakeKv();
+  kv.store.set(`key:${OWNER_KEY}`, OWNER_RECORD);
+  engine = makeFakeEngine();
+  context = {
+    auth: OWNER,
+    kv,
+    getEngine: async () => engine,
+    now: () => new Date("2026-08-20T02:15:00Z"),
+  };
+});
+
+/** 占星術層に JSON-RPC を 1 発投げる（鍵の照合は済んでいる前提のハンドラ直叩き） */
+async function rpc(body: unknown, ctx: AstroContext = context): Promise<any> {
+  const response = await handleAstroMcpRequest(
+    new Request("http://localhost/mcp/testkey123", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    ctx,
+  );
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+let nextId = 1;
+
+/** tools/call を 1 発。result（ToolResult）を返す */
+async function call(name: string, args: unknown = {}, ctx: AstroContext = context): Promise<any> {
+  const json = await rpc(
+    { jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name, arguments: args } },
+    ctx,
+  );
+  return json.result;
+}
+
+/** worker.fetch 経由（鍵の照合込み） */
+async function fetchMcp(
+  path: string,
+  body: unknown,
+  method = "POST",
+  // withEnv: false で「バインディングごと無い」状態を再現する
+  options: { withEnv?: boolean } = {},
+): Promise<{ response: Response; json: any }> {
+  const init: RequestInit = { method };
+  if (method === "POST") {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const env: Env | undefined =
+    options.withEnv === false ? undefined : { ASTRO_KV: kv.asKvNamespace() };
+  const response = await worker.fetch(new Request(`http://localhost${path}`, init), env);
+  const text = await response.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return { response, json };
+}
+
+/** 標準の出生データ（1990-06-15 12:00 UTC・東京） */
+const BIRTH = {
+  label: "サンプル",
+  year: 1990,
+  month: 6,
+  day: 15,
+  hour: 12,
+  minute: 0,
+  utc_offset: 0,
+  lat: 35.6895,
+  lng: 139.6917,
+};
+
+async function saveDefaultChart(): Promise<string> {
+  const result = await call("save_chart", BIRTH);
+  expect(result.isError).toBeUndefined();
+  return result.structuredContent.chart_id as string;
+}
+
+// ---------------------------------------------------------------------------
+
+describe("占星術層の initialize / tools/list", () => {
+  it("serverInfo はカード層と同じ名前、instructions は別文", async () => {
+    const json = await rpc({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-03-26" },
+    });
+    expect(json.result.protocolVersion).toBe("2025-03-26");
+    expect(json.result.capabilities).toEqual({ tools: {} });
+    expect(json.result.serverInfo.name).toBe("fortune-gatekeeper");
+    expect(typeof json.result.serverInfo.version).toBe("string");
+
+    const instructions: string = json.result.instructions;
+    // 計算はサーバー、解釈は会話中の LLM
+    expect(instructions).toContain("計算するのはサーバー");
+    expect(instructions).toContain("解釈は一切しません");
+    // 原本レス
+    expect(instructions).toContain("出生日時と出生地は計算に使ったあと捨てます");
+    // ツールの使い分け
+    expect(instructions).toContain("save_chart");
+    expect(instructions).toContain("list_charts");
+    expect(instructions).toContain("transit");
+    expect(instructions).toContain("delete_chart");
+    expect(instructions).toContain("lunar_return");
+    expect(instructions).toContain("solar_return");
+    // 二次進行は「原本を預けた本人だけ」と断ってある
+    expect(instructions).toContain("progressions");
+    expect(instructions).toContain("原本を預けた本人");
+    // カード層の文言は混ざらない
+    expect(instructions).not.toContain("draw_cards");
+    // 作者の氏名は書かない
+    expect(instructions).not.toContain("和条門");
+  });
+
+  it("知らないバージョンなら既定の 2025-06-18", async () => {
+    const json = await rpc({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: { protocolVersion: "1999-01-01" },
+    });
+    expect(json.result.protocolVersion).toBe("2025-06-18");
+  });
+
+  it("7 本のツールを返す", async () => {
+    const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
+    const names = json.result.tools.map((tool: { name: string }) => tool.name);
+    expect(names).toEqual([
+      "save_chart",
+      "list_charts",
+      "delete_chart",
+      "transit",
+      "lunar_return",
+      "solar_return",
+      "progressions",
+    ]);
+  });
+
+  it("ツール定義は凍結（クライアントが接続時にキャッシュするので勝手に変えない）", async () => {
+    const json = await rpc({ jsonrpc: "2.0", id: 4, method: "tools/list" });
+    expect(json.result.tools).toEqual(FROZEN_ASTRO_TOOLS);
+  });
+
+  it("ping と知らないメソッド", async () => {
+    expect((await rpc({ jsonrpc: "2.0", id: 5, method: "ping" })).result).toEqual({});
+    const unknown = await rpc({ jsonrpc: "2.0", id: 6, method: "resources/list" });
+    expect(unknown.error.code).toBe(-32601);
+  });
+});
+
+describe("鍵の照合（POST /mcp/<鍵>）", () => {
+  it("知らない鍵は 401。鍵そのものは返事に出さない", async () => {
+    const { response, json } = await fetchMcp("/mcp/badkey0000", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    expect(response.status).toBe(401);
+    expect(json.error.code).toBe(-32001);
+    expect(json.error.message).not.toContain("badkey0000");
+    expect(json.error.message).toContain("確認できませんでした");
+  });
+
+  it("形の違う鍵（記号入り・短すぎ）も同じ 401", async () => {
+    for (const key of ["a", "%E3%81%82%E3%81%82", "key:testkey123"]) {
+      const { response } = await fetchMcp(`/mcp/${key}`, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+      });
+      expect(response.status).toBe(401);
+    }
+  });
+
+  it("正しい鍵なら initialize と tools/list が通る", async () => {
+    const init = await fetchMcp(`/mcp/${OWNER_KEY}`, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+    expect(init.response.status).toBe(200);
+    expect(init.response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(init.json.result.serverInfo.name).toBe("fortune-gatekeeper");
+    expect(init.json.result.instructions).toContain("ホロスコープ");
+
+    const tools = await fetchMcp(`/mcp/${OWNER_KEY}`, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    });
+    expect(tools.json.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "save_chart",
+      "list_charts",
+      "delete_chart",
+      "transit",
+      "lunar_return",
+      "solar_return",
+      "progressions",
+    ]);
+  });
+
+  it("鍵つき URL でも GET / DELETE は 405", async () => {
+    for (const method of ["GET", "DELETE"]) {
+      const { response } = await fetchMcp(`/mcp/${OWNER_KEY}`, null, method);
+      expect(response.status).toBe(405);
+    }
+  });
+
+  it("KV バインディングが無ければ 500（黙って動いたふりをしない）", async () => {
+    const { response, json } = await fetchMcp(
+      `/mcp/${OWNER_KEY}`,
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      "POST",
+      { withEnv: false },
+    );
+    expect(response.status).toBe(500);
+    expect(json.error.code).toBe(-32603);
+  });
+
+  it("公開カード層は無傷（3 本のまま・鍵も要らない）", async () => {
+    const { response, json } = await fetchMcp("/mcp", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+    });
+    expect(response.status).toBe(200);
+    expect(json.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      "list_decks",
+      "draw_cards",
+      "cast_hexagram",
+    ]);
+  });
+
+  it("案内文は占星術層の存在にだけ触れ、鍵の形は書かない", async () => {
+    const response = await worker.fetch(new Request("http://localhost/"));
+    const text = await response.text();
+    expect(text).toContain("占星術");
+    expect(text).not.toContain("/mcp/");
+  });
+});
+
+describe("save_chart", () => {
+  it("chart_id とネイタル要約を返し、出生日時・出生地は保存しない", async () => {
+    // 出生地（東京）と「いつもの場所」（大阪）をわざと別にして、残るのが後者だけだと確かめる
+    const result = await call("save_chart", {
+      ...BIRTH,
+      default_lat: 34.6937,
+      default_lng: 135.5023,
+      default_location_label: "大阪",
+    });
+    expect(result.isError).toBeUndefined();
+
+    const chartId: string = result.structuredContent.chart_id;
+    expect(chartId).toMatch(/^[a-z0-9]{8}$/);
+
+    const text: string = result.content[0].text;
+    expect(text).toContain(`chart_id: ${chartId}`);
+    expect(text).toContain("ラベル: サンプル");
+    expect(text).toContain("ハウス方式: プラシーダス（P）");
+    expect(text).toContain("いつもの場所: 大阪 緯度 34.6937 / 経度 135.5023");
+    // 偽エンジンは天体を 30° 刻みに並べる。ハウスはカスプ（1H=90°）基準
+    expect(text).toContain("太陽 牡羊座 0°00′ (10H)");
+    expect(text).toContain("月 牡牛座 0°00′ (11H)");
+    expect(text).toContain("金星 蟹座 0°00′ (1H)（逆行）");
+    expect(text).toContain("ASC 蟹座 0°00′ / MC 水瓶座 0°00′");
+    expect(text.trimEnd().endsWith("出生日時・出生地は保存していません（計算に使って捨てました）。")).toBe(
+      true,
+    );
+
+    // KV に落ちた中身に、出生日時・出生地・jd が混ざっていないこと
+    const raw = kv.store.get(`chart:user1:${chartId}`) as string;
+    const stored = JSON.parse(raw);
+    expect(Object.keys(stored).sort()).toEqual([
+      "ascmc",
+      "created",
+      "cusps",
+      "default_location",
+      "house_system",
+      "label",
+      "planets",
+    ]);
+    // 出生年・出生地の緯度経度はどこにも残っていない
+    expect(raw).not.toContain("1990");
+    expect(raw).not.toContain("35.6895");
+    expect(raw).not.toContain("139.6917");
+    expect(stored.planets).toHaveLength(11);
+    expect(stored.planets[0]).toEqual({ id: 0, lon: 0, speed: 1 });
+    // 明示的に預けた「いつもの場所」だけが残る
+    expect(stored.default_location).toEqual({ lat: 34.6937, lng: 135.5023, label: "大阪" });
+
+    // 計算そのものには出生地がちゃんと渡っている（渡してから捨てている）
+    expect(engine.houseCalls[0]?.lat).toBe(35.6895);
+    expect(engine.houseCalls[0]?.lng).toBe(139.6917);
+  });
+
+  it("いつもの場所を省略すれば default_location も持たない", async () => {
+    const result = await call("save_chart", BIRTH);
+    expect(result.structuredContent.default_location).toBeUndefined();
+    expect(result.content[0].text).not.toContain("いつもの場所");
+  });
+
+  it("時差は jd に溶ける（日本時間 21:00 ＝ 12:00 UTC）", async () => {
+    await call("save_chart", BIRTH);
+    const utcJd = engine.juldays[0] as number;
+
+    engine.juldays.length = 0;
+    await call("save_chart", { ...BIRTH, hour: 21, utc_offset: 9 });
+    expect(engine.juldays[0]).toBeCloseTo(utcJd, 8);
+  });
+
+  it("ハウス方式は指定どおりエンジンに渡る", async () => {
+    await call("save_chart", { ...BIRTH, house_system: "W" });
+    expect(engine.houseCalls[0]?.hsys).toBe("W");
+    const listed = await call("list_charts");
+    expect(listed.content[0].text).toContain("ホールサイン（W）");
+  });
+
+  it("足りない引数・範囲外・知らないハウス方式は isError", async () => {
+    expect((await call("save_chart", {})).content[0].text).toContain("label は必須です");
+    const noYear = await call("save_chart", { ...BIRTH, year: undefined });
+    expect(noYear.isError).toBe(true);
+    expect((await call("save_chart", { ...BIRTH, month: 13 })).isError).toBe(true);
+    expect((await call("save_chart", { ...BIRTH, lat: 91 })).isError).toBe(true);
+    expect((await call("save_chart", { ...BIRTH, hour: 12.5 })).isError).toBe(true);
+    const badHouse = await call("save_chart", { ...BIRTH, house_system: "Z" });
+    expect(badHouse.isError).toBe(true);
+    expect(badHouse.content[0].text).toContain("house_system");
+    // いつもの場所は緯度・経度そろえて
+    const halfPlace = await call("save_chart", { ...BIRTH, default_lat: 35 });
+    expect(halfPlace.isError).toBe(true);
+  });
+
+  it("エンジンが立ち上がらなければ、そう言う", async () => {
+    const broken: AstroContext = {
+      ...context,
+      getEngine: async () => {
+        throw new Error("wasm がありません");
+      },
+    };
+    const result = await call("save_chart", BIRTH, broken);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("天体計算エンジンを初期化できませんでした");
+  });
+});
+
+describe("list_charts / delete_chart", () => {
+  it("0 件なら save_chart へ誘導する", async () => {
+    const result = await call("list_charts");
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.charts).toEqual([]);
+    expect(result.content[0].text).toContain("保存済みのチャートはまだありません");
+    expect(result.content[0].text).toContain("save_chart");
+  });
+
+  it("登録すると一覧に出る", async () => {
+    const chartId = await saveDefaultChart();
+    const result = await call("list_charts");
+    expect(result.structuredContent.charts).toHaveLength(1);
+    expect(result.structuredContent.charts[0].chart_id).toBe(chartId);
+    expect(result.content[0].text).toContain("保存済みチャート（1件）");
+    expect(result.content[0].text).toContain(`- ${chartId}: サンプル`);
+    expect(result.content[0].text).toContain("プラシーダス（P）");
+  });
+
+  it("他人のチャートは見えない（chart: の前置きで仕切ってある）", async () => {
+    const chartId = await saveDefaultChart();
+    const other: AstroContext = {
+      ...context,
+      auth: { user: "tomodachi", name: "ともだち", role: "friend" },
+    };
+    const listed = await call("list_charts", {}, other);
+    expect(listed.structuredContent.charts).toEqual([]);
+    const peek = await call("transit", { chart_id: chartId }, other);
+    expect(peek.isError).toBe(true);
+  });
+
+  it("delete_chart は消して、二度目は見つからない", async () => {
+    const chartId = await saveDefaultChart();
+
+    const removed = await call("delete_chart", { chart_id: chartId });
+    expect(removed.isError).toBeUndefined();
+    expect(removed.content[0].text).toBe(`チャート ${chartId}（サンプル）を削除しました。`);
+    expect(kv.store.has(`chart:user1:${chartId}`)).toBe(false);
+
+    const again = await call("delete_chart", { chart_id: chartId });
+    expect(again.isError).toBe(true);
+    expect(again.content[0].text).toContain("見つかりませんでした");
+
+    expect((await call("list_charts")).structuredContent.charts).toEqual([]);
+  });
+});
+
+describe("transit", () => {
+  it("日時を指定すると、その時刻の天体・在ハウス・アスペクトを返す", async () => {
+    const chartId = await saveDefaultChart();
+    // ネイタルから 0.5° ずらした空にする
+    engine.offset = 0.5;
+
+    const result = await call("transit", {
+      chart_id: chartId,
+      year: 2026,
+      month: 8,
+      day: 20,
+      hour: 0,
+      minute: 0,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("トランジット");
+    expect(text).toContain(`チャート: サンプル（${chartId}） / ハウス方式: プラシーダス（P）`);
+    expect(text).toContain("日時: 2026-08-20 00:00 UTC");
+    // utc_offset を渡していないのでローカル表示は出ない
+    expect(text).not.toContain("ローカル");
+
+    // (a) 星座・度数・逆行 と (b) ネイタルのカスプによる在ハウス
+    expect(text).toContain("■ トランジット天体（カッコ内はネイタルのカスプで見た在ハウス）");
+    expect(text).toContain("太陽 牡羊座 0°30′ (10H)");
+    expect(text).toContain("金星 蟹座 0°30′ (1H)（逆行）");
+    // ネイタルも参考に並ぶ
+    expect(text).toContain("■ ネイタル天体（参考）");
+    expect(text).toContain("ASC 蟹座 0°00′ / MC 水瓶座 0°00′");
+
+    // (c) クロスアスペクト（ASC / MC も相手になる）
+    expect(text).toContain("■ ネイタルへのアスペクト（メジャー5種・オーブ 1.0°）");
+    expect(text).toContain("T.太陽 ☌ N.太陽（コンジャンクション / オーブ 0.50° / 離反）");
+    expect(text).toContain("N.ASC");
+    expect(text).toContain("N.MC");
+    // 逆行してくる金星はネイタル金星へ接近中
+    expect(text).toContain("T.金星 ☌ N.金星（コンジャンクション / オーブ 0.50° / 接近）");
+
+    const structured = result.structuredContent;
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.utc).toBe("2026-08-20T00:00:00.000Z");
+    expect(structured.is_now).toBe(false);
+    expect(structured.transit_planets).toHaveLength(11);
+    expect(structured.transit_planets[0]).toEqual({
+      id: 0,
+      name: "太陽",
+      lon: 0.5,
+      speed: 1,
+      retrograde: false,
+      position: "牡羊座 0°30′",
+      house: 10,
+    });
+    expect(structured.aspects.length).toBeGreaterThan(0);
+    // オーブの狭い順
+    const orbs = structured.aspects.map((hit: { aspect: { orb: number } }) => hit.aspect.orb);
+    expect([...orbs].sort((a, b) => a - b)).toEqual(orbs);
+  });
+
+  it("utc_offset を渡すとローカル表示も付く", async () => {
+    const chartId = await saveDefaultChart();
+    const result = await call("transit", {
+      chart_id: chartId,
+      year: 2026,
+      month: 8,
+      day: 20,
+      hour: 9,
+      minute: 0,
+      utc_offset: 9,
+    });
+    const text: string = result.content[0].text;
+    expect(text).toContain("日時: 2026-08-20 00:00 UTC");
+    expect(text).toContain("ローカル 2026-08-20 09:00（UTC+9）");
+    expect(result.structuredContent.utc).toBe("2026-08-20T00:00:00.000Z");
+  });
+
+  it("日時をすべて省略すると現在時刻（UTC）", async () => {
+    const chartId = await saveDefaultChart();
+    const result = await call("transit", { chart_id: chartId });
+    expect(result.content[0].text).toContain("日時: 2026-08-20 02:15 UTC（現在時刻）");
+    expect(result.structuredContent.is_now).toBe(true);
+    expect(result.structuredContent.utc).toBe("2026-08-20T02:15:00.000Z");
+  });
+
+  it("日付を半端に指定したら止める", async () => {
+    const chartId = await saveDefaultChart();
+    const result = await call("transit", { chart_id: chartId, hour: 12 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("year / month / day をそろえて");
+  });
+
+  it("アスペクトが 1 本も無ければ、その旨", async () => {
+    const chartId = await saveDefaultChart();
+    // 15° ずらすとメジャーアスペクト（0/60/90/120/180）からきれいに外れる
+    engine.offset = 15;
+    const result = await call("transit", { chart_id: chartId, year: 2026, month: 8, day: 20 });
+    expect(result.content[0].text).toContain("該当なし");
+    expect(result.structuredContent.aspects).toEqual([]);
+  });
+
+  it("知らない chart_id は丁寧に断る", async () => {
+    const result = await call("transit", { chart_id: "nosuchid" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("チャート nosuchid が見つかりませんでした");
+    expect(result.content[0].text).toContain("list_charts");
+  });
+
+  it("chart_id の形をしていないものも同じ扱い（KV を引きに行かない）", async () => {
+    const result = await call("transit", { chart_id: "../../key:testkey123" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("見つかりませんでした");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// リターン（ルナリターン・ソーラーリターン）
+// ---------------------------------------------------------------------------
+
+/** 偽エンジンと同じ式でユリウス日を作る（テスト側から通過の日時を仕込むため） */
+function jdOf(year: number, month: number, day: number, hour = 0): number {
+  return Math.floor(Date.UTC(year, month - 1, day) / 86_400_000) + 2440587.5 + hour / 24;
+}
+
+/** 東京を「いつもの場所」として登録したチャート */
+async function saveChartWithHome(): Promise<string> {
+  const result = await call("save_chart", {
+    ...BIRTH,
+    default_lat: 35.6895,
+    default_lng: 139.6917,
+    default_location_label: "東京",
+  });
+  expect(result.isError).toBeUndefined();
+  return result.structuredContent.chart_id as string;
+}
+
+describe("lunar_return", () => {
+  it("引数を省略すると現在時刻から見て次の 1 回", async () => {
+    const chartId = await saveChartWithHome();
+    // 次の通過を 2026-08-21 03:00 UTC に仕込む（現在は 2026-08-20 02:15 UTC）
+    engine.moonAnchorJd = jdOf(2026, 8, 21, 3);
+
+    const result = await call("lunar_return", { chart_id: chartId, utc_offset: 9 });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("ルナリターン（月の帰還）");
+    expect(text).toContain(`チャート: サンプル（${chartId}） / ハウス方式: プラシーダス（P）`);
+    // ネイタル月は偽エンジンでは 30°（牡牛座 0°）
+    expect(text).toContain("ネイタルの月: 牡牛座 0°00′");
+    expect(text).toContain("リターン図を立てた場所: 東京（緯度 35.6895 / 経度 139.6917）");
+    expect(text).toContain("（現在）より後の次の 1 回");
+    expect(text).toContain("リターンの瞬間: 2026-08-21 03:00 UTC");
+    expect(text).toContain("ローカル 2026-08-21 12:00（UTC+9）");
+    expect(text).toContain("□ リターン図の天体（カッコ内はリターン図自身のカスプで見た在ハウス）");
+    expect(text).toContain("太陽 牡羊座 0°00′ (10H)");
+    expect(text).toContain("ASC 蟹座 0°00′ / MC 水瓶座 0°00′");
+    expect(text).toContain("□ リターン図のハウスカスプ");
+    expect(text).toContain("1H 蟹座 0°00′ / 2H 獅子座 0°00′");
+    expect(text).toContain("□ ネイタルへのアスペクト（メジャー5種・オーブ 1.0°）");
+    expect(text).toContain("T.月 ☌ N.月");
+    // 1 回しか無いときは「■ n 回目」を出さない
+    expect(text).not.toContain("■ 1 回目");
+
+    // 「いつもの場所」でハウスを立てている（最後の swe_houses 呼び出し）
+    const lastHouse = engine.houseCalls[engine.houseCalls.length - 1];
+    expect(lastHouse?.lat).toBe(35.6895);
+    expect(lastHouse?.lng).toBe(139.6917);
+    expect(lastHouse?.hsys).toBe("P");
+
+    // 通過計算は月・フラグ 260・現在の jd から
+    expect(engine.crossCalls).toHaveLength(1);
+    expect(engine.crossCalls[0]?.kind).toBe("moon");
+    expect(engine.crossCalls[0]?.targetLon).toBe(30);
+    expect(engine.crossCalls[0]?.flags).toBe(260);
+    expect(engine.crossCalls[0]?.startJd).toBeCloseTo(jdOf(2026, 8, 20) + 2.25 / 24, 6);
+
+    const structured = result.structuredContent;
+    expect(structured.kind).toBe("lunar_return");
+    expect(structured.is_next).toBe(true);
+    expect(structured.period).toBeNull();
+    expect(structured.location).toEqual({ lat: 35.6895, lng: 139.6917, label: "東京" });
+    expect(structured.returns).toHaveLength(1);
+    expect(structured.returns[0].utc).toBe("2026-08-21T03:00:00.000Z");
+    expect(structured.returns[0].planets).toHaveLength(11);
+    expect(structured.returns[0].cusps).toHaveLength(13);
+    expect(structured.returns[0].aspects.length).toBeGreaterThan(0);
+  });
+
+  it("year / month を指定すると、その月に入るぶんをすべて返す（2 回の月）", async () => {
+    const chartId = await saveChartWithHome();
+    // 8/2 と 8/29.32 の 2 回が 8 月に入る並び
+    engine.moonAnchorJd = jdOf(2026, 8, 2);
+
+    const result = await call("lunar_return", {
+      chart_id: chartId,
+      year: 2026,
+      month: 8,
+      utc_offset: 9,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("対象: 2026年8月（UTC+9 の暦） ― 2件");
+    expect(text).toContain("■ 1 回目");
+    expect(text).toContain("■ 2 回目");
+    expect(result.structuredContent.returns).toHaveLength(2);
+    expect(result.structuredContent.is_next).toBe(false);
+    expect(result.structuredContent.period).toEqual({ year: 2026, month: 8 });
+    // 2 件目は 27.32 日後
+    const [first, second] = result.structuredContent.returns;
+    expect(second.jd - first.jd).toBeCloseTo(27.32, 6);
+  });
+
+  it("その月に 1 回も入らなければ、そう言う（0 回の月）", async () => {
+    const chartId = await saveChartWithHome();
+    // 周期を伸ばして 8 月を素通りさせる（次の通過は 9/5）
+    engine.moonPeriod = 35;
+    engine.moonAnchorJd = jdOf(2026, 9, 5);
+
+    const result = await call("lunar_return", { chart_id: chartId, year: 2026, month: 8 });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("対象: 2026年8月（UTC の暦） ― 0件");
+    expect(result.content[0].text).toContain("この期間に月のリターンはありませんでした");
+    expect(result.structuredContent.returns).toEqual([]);
+  });
+
+  it("暦月の区切りは utc_offset の土地の暦で見る", async () => {
+    const chartId = await saveChartWithHome();
+    // 2026-08-31 20:00 UTC ＝ 日本時間では 9/1 05:00。JST の暦では 8 月に入らない
+    engine.moonAnchorJd = jdOf(2026, 8, 31, 20);
+
+    const utc = await call("lunar_return", { chart_id: chartId, year: 2026, month: 8 });
+    const utcMoments = utc.structuredContent.returns.map((one: { utc: string }) => one.utc);
+    expect(utcMoments).toContain("2026-08-31T20:00:00.000Z");
+
+    const jst = await call("lunar_return", {
+      chart_id: chartId,
+      year: 2026,
+      month: 8,
+      utc_offset: 9,
+    });
+    const jstMoments = jst.structuredContent.returns.map((one: { utc: string }) => one.utc);
+    // 日本時間では 9/1 05:00 なので、JST の 8 月には入らない
+    expect(jstMoments).not.toContain("2026-08-31T20:00:00.000Z");
+    expect(jstMoments).toHaveLength(utcMoments.length - 1);
+  });
+
+  it("lat / lng を渡せばそこで立てる（いつもの場所より優先）", async () => {
+    const chartId = await saveChartWithHome();
+    engine.moonAnchorJd = jdOf(2026, 8, 21, 3);
+
+    const result = await call("lunar_return", {
+      chart_id: chartId,
+      lat: 34.6937,
+      lng: 135.5023,
+      location_label: "大阪",
+    });
+    expect(result.content[0].text).toContain(
+      "リターン図を立てた場所: 大阪（緯度 34.6937 / 経度 135.5023）",
+    );
+    const lastHouse = engine.houseCalls[engine.houseCalls.length - 1];
+    expect(lastHouse?.lat).toBe(34.6937);
+    // utc_offset を渡していないのでローカル表示は出ない
+    expect(result.content[0].text).not.toContain("ローカル");
+  });
+
+  it("場所が分からなければ、場所を教えてほしいと言う", async () => {
+    const chartId = await saveDefaultChart(); // いつもの場所を登録していない
+    const result = await call("lunar_return", { chart_id: chartId });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("リターン図を立てる場所が分かりません");
+    expect(result.content[0].text).toContain("default_lat / default_lng");
+  });
+
+  it("year と month は片方だけでは受け付けない", async () => {
+    const chartId = await saveChartWithHome();
+    const onlyYear = await call("lunar_return", { chart_id: chartId, year: 2026 });
+    expect(onlyYear.isError).toBe(true);
+    expect(onlyYear.content[0].text).toContain("year と month はそろえて");
+    expect((await call("lunar_return", { chart_id: chartId, month: 8 })).isError).toBe(true);
+  });
+
+  it("lat だけ・知らない chart_id も丁寧に断る", async () => {
+    const chartId = await saveChartWithHome();
+    const halfPlace = await call("lunar_return", { chart_id: chartId, lat: 35 });
+    expect(halfPlace.isError).toBe(true);
+    expect(halfPlace.content[0].text).toContain("lat と lng は両方そろえて");
+
+    const missing = await call("lunar_return", { chart_id: "nosuchid" });
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain("見つかりませんでした");
+  });
+
+  it("通過計算が開始 jd より後を返さなければエラーにする（wrapper のエラーチェックが壊れているため）", async () => {
+    const chartId = await saveChartWithHome();
+    engine.crossFails = true;
+
+    const result = await call("lunar_return", { chart_id: chartId });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("月が同じ黄経に戻る瞬間を計算できませんでした");
+    expect(result.content[0].text).toContain("探索開始より後");
+  });
+});
+
+describe("solar_return", () => {
+  it("year を指定するとその年の 1 回", async () => {
+    const chartId = await saveChartWithHome();
+    engine.sunAnchorJd = jdOf(2027, 6, 16, 6);
+
+    const result = await call("solar_return", {
+      chart_id: chartId,
+      year: 2027,
+      utc_offset: 9,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("ソーラーリターン（太陽の帰還）");
+    expect(text).toContain("ネイタルの太陽: 牡羊座 0°00′");
+    expect(text).toContain("対象: 2027年（UTC+9 の暦） ― 1件");
+    expect(text).toContain("リターンの瞬間: 2027-06-16 06:00 UTC");
+    expect(text).toContain("ローカル 2027-06-16 15:00（UTC+9）");
+    expect(result.structuredContent.kind).toBe("solar_return");
+    expect(result.structuredContent.period).toEqual({ year: 2027 });
+    expect(result.structuredContent.returns).toHaveLength(1);
+
+    // 太陽で・その年の 1 月 1 日から探している
+    expect(engine.crossCalls).toHaveLength(1);
+    expect(engine.crossCalls[0]?.kind).toBe("sun");
+    expect(engine.crossCalls[0]?.targetLon).toBe(0);
+    expect(engine.crossCalls[0]?.startJd).toBeCloseTo(jdOf(2027, 1, 1) - 9 / 24, 6);
+  });
+
+  it("year を省略すると現在時刻から見て次の 1 回", async () => {
+    const chartId = await saveChartWithHome();
+    engine.sunAnchorJd = jdOf(2027, 6, 16, 6);
+
+    const result = await call("solar_return", { chart_id: chartId });
+    expect(result.structuredContent.is_next).toBe(true);
+    expect(result.structuredContent.returns[0].utc).toBe("2027-06-16T06:00:00.000Z");
+    expect(engine.crossCalls[0]?.startJd).toBeCloseTo(jdOf(2026, 8, 20) + 2.25 / 24, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 二次進行（オーナー特権）
+// ---------------------------------------------------------------------------
+
+/** ダミーの出生原本（本物の値ではない。1990-06-15 12:00 UTC・東京） */
+const OWNER_NATAL_JSON = JSON.stringify({
+  user: "user1",
+  year: 1990,
+  month: 6,
+  day: 15,
+  hour: 12,
+  minute: 0,
+  utc_offset: 0,
+  lat: 35.6895,
+  lng: 139.6917,
+  house_system: "P",
+});
+
+const FRIEND: AuthContext = { user: "friend1", name: "ともだち", role: "friend" };
+
+describe("progressions", () => {
+  it("オーナー＋原本ありなら、進行天体・進行 ASC/MC・クロスアスペクトを返す", async () => {
+    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
+    const result = await call("progressions", {}, owner);
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("プログレッション（二次進行・一日一年法）");
+    // 1990-06-15 → 2026-08-20 は 36.18 年ぶん
+    expect(text).toContain("対象日: 2026-08-20（今日・UTC の暦） / 36歳2ヶ月相当");
+    expect(text).toContain("ハウス方式: プラシーダス（P）");
+    expect(text).toContain("■ 進行天体（カッコ内は出生図のカスプで見た在ハウス）");
+    expect(text).toContain("太陽 牡羊座 0°00′ (10H)");
+    // 進行 ASC/MC は swe_houses_armc の値（偽エンジンでは 100° / 310°）
+    expect(text).toContain("ASC 蟹座 10°00′ / MC 水瓶座 10°00′");
+    expect(text).toContain("■ ネイタル（参考）");
+    expect(text).toContain("■ 進行天体からネイタルへのアスペクト（メジャー5種・オーブ 1.0°）");
+    expect(text).toContain("P.太陽 ☌ N.太陽");
+    // トランジットの記号（T.）は使わない
+    expect(text).not.toContain("T.太陽");
+
+    // **出生日時・出生地の数値は書かない**
+    expect(text).not.toContain("1990");
+    expect(text).not.toContain("35.6895");
+    expect(text).not.toContain("139.6917");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("35.6895");
+
+    // ARMC 方式のハウスは出生地の緯度・真黄道傾斜・チャートのハウス方式で立つ
+    expect(engine.armcCalls).toHaveLength(1);
+    expect(engine.armcCalls[0]?.lat).toBe(35.6895);
+    expect(engine.armcCalls[0]?.eps).toBe(23.44);
+    expect(engine.armcCalls[0]?.hsys).toBe("P");
+
+    const structured = result.structuredContent;
+    expect(structured.target_date).toBe("2026-08-20");
+    expect(structured.is_today).toBe(true);
+    expect(structured.age_label).toBe("36歳2ヶ月相当");
+    expect(structured.age_years).toBeCloseTo(36.18, 1);
+    expect(structured.progressed_planets).toHaveLength(11);
+    expect(structured.natal_planets).toHaveLength(11);
+    expect(structured.progressed_angles.asc_position).toBe("蟹座 10°00′");
+    // 出生の瞬間そのもの（jd）は載せない
+    expect(Object.keys(structured)).not.toContain("natal_jd");
+    expect(Object.keys(structured)).not.toContain("progressed_jd");
+  });
+
+  it("対象日を指定できる。utc_offset は「今日」の暦にも効く", async () => {
+    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
+
+    const dated = await call("progressions", { year: 2030, month: 1, day: 1 }, owner);
+    expect(dated.content[0].text).toContain("対象日: 2030-01-01 / 39歳6ヶ月相当");
+    expect(dated.structuredContent.is_today).toBe(false);
+
+    // 現在は 2026-08-20 02:15 UTC ＝ UTC-9 の土地ではまだ 8/19
+    const shifted = await call("progressions", { utc_offset: -9 }, owner);
+    expect(shifted.content[0].text).toContain("対象日: 2026-08-19（今日・UTC-9 の暦）");
+  });
+
+  it("year / month / day は 3 つそろえて。出生より前は断る", async () => {
+    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
+
+    const partial = await call("progressions", { year: 2030 }, owner);
+    expect(partial.isError).toBe(true);
+    expect(partial.content[0].text).toContain("そろえて指定してください");
+
+    const tooEarly = await call("progressions", { year: 1980, month: 1, day: 1 }, owner);
+    expect(tooEarly.isError).toBe(true);
+    expect(tooEarly.content[0].text).toContain("対象日が出生より前です");
+  });
+
+  it("friend の鍵では使えない（原本の有無には触れない）", async () => {
+    const friend: AstroContext = { ...context, auth: FRIEND, ownerNatal: OWNER_NATAL_JSON };
+    const result = await call("progressions", {}, friend);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("出生原本を預けた本人専用です");
+    // 原本の中身も、預かっているかどうかも言わない
+    expect(result.content[0].text).not.toContain("OWNER_NATAL");
+    expect(result.content[0].text).not.toContain("1990");
+  });
+
+  it("原本が預けられていなければ、その設定が要ると言う", async () => {
+    const result = await call("progressions", {}); // context には ownerNatal が無い
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("出生の原本が預けられていない");
+    expect(result.content[0].text).toContain("wrangler secret put OWNER_NATAL");
+  });
+
+  it("原本の持ち主が違えば断る", async () => {
+    const other: AstroContext = {
+      ...context,
+      ownerNatal: JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), user: "someone-else" }),
+    };
+    const result = await call("progressions", {}, other);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("出生原本の持ち主のものではありません");
+    expect(result.content[0].text).not.toContain("someone-else");
+  });
+
+  it("原本が壊れていたら、中身に触れずに断る", async () => {
+    for (const broken of [
+      "これは JSON ではありません",
+      JSON.stringify({ user: "user1", year: 1990 }),
+      JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), house_system: "Z" }),
+      JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), lat: 999 }),
+    ]) {
+      const ctx: AstroContext = { ...context, ownerNatal: broken };
+      const result = await call("progressions", {}, ctx);
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain("読み取れませんでした");
+      expect(result.content[0].text).not.toContain("year");
+      expect(result.content[0].text).not.toContain("1990");
+    }
+  });
+});
+
+describe("知らないツール", () => {
+  it("isError で返す", async () => {
+    const result = await call("reverse_horoscope", {});
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("知らないツールです");
+  });
+});
+
+/**
+ * tools/list の返り値まるごと（凍結）。
+ *
+ * カード層と同じ理由 ―― クライアントは接続時にツール定義を取り込んでキャッシュし、
+ * サーバー側を直しても取り直しに来ない。うっかり文言をいじってしまわないよう丸ごと止めてある。
+ * 意図して変えたときだけこの literal を更新すること。
+ * ※ 返り値（content / structuredContent）を増やすのは「定義」の変更ではないので、ここは緑のまま。
+ */
+const FROZEN_ASTRO_TOOLS = [
+  {
+    "name": "save_chart",
+    "title": "出生図を登録する",
+    "description": "出生データからネイタルチャート（出生図）を計算し、chart_id を付けて保存する。以後は chart_id だけでトランジットなどを引ける。\n**保存されるのは計算結果の座標だけ**——天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・ハウス方式のみで、出生日時と出生地は計算に使ったあと捨てる（サーバーに残らない）。そのぶん、ハウス方式を変えて計算し直したいときは、もう一度このツールを呼ぶ必要がある。\n日時は**出生地の現地時刻**で渡し、utc_offset にその土地の時差を書く（日本は 9）。緯度・経度は北緯・東経が正、南緯・西経が負。\ndefault_lat / default_lng は「いつもの場所」（現在の居住地など）で、後々のリターン計算で使う。分からなければ省略してよい。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "チャートの呼び名（一覧に出る）。本人の名前でも「わたし」「Aさん」でもよい。"
+        },
+        "year": {
+          "type": "integer",
+          "description": "出生年（西暦）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "出生月（1-12）"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "出生日（1-31）"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "description": "出生時刻の「時」（0-23、出生地の現地時刻）"
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59,
+          "description": "出生時刻の「分」（0-59、出生地の現地時刻）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "出生地の UTC からの時差（時間単位。日本は 9、インドのような 30 分刻みは 5.5 のように小数で）"
+        },
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "出生地の緯度（北緯が正）"
+        },
+        "lng": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "出生地の経度（東経が正）"
+        },
+        "house_system": {
+          "type": "string",
+          "enum": [
+            "P",
+            "K",
+            "W",
+            "E"
+          ],
+          "default": "P",
+          "description": "ハウス方式（既定 P）。P=プラシーダス / K=コッホ / W=ホールサイン / E=イコール。出生時刻がはっきりしない場合はホールサイン（W）が無難。"
+        },
+        "default_lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "「いつもの場所」の緯度（任意。リターン計算で使う）"
+        },
+        "default_lng": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "「いつもの場所」の経度（任意）"
+        },
+        "default_location_label": {
+          "type": "string",
+          "description": "「いつもの場所」の呼び名（任意。例: 東京）"
+        }
+      },
+      "required": [
+        "label",
+        "year",
+        "month",
+        "day",
+        "hour",
+        "minute",
+        "utc_offset",
+        "lat",
+        "lng"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_charts",
+    "title": "登録済みチャートの一覧",
+    "description": "この URL に登録されているチャートの一覧を返す（chart_id・ラベル・ハウス方式・「いつもの場所」・登録日時）。transit を呼ぶ前に chart_id を確かめたいときに使う。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_chart",
+    "title": "登録済みチャートを消す",
+    "description": "chart_id を指定して登録を取り消す。消したチャートは戻せない（出生日時・出生地を保存していないため、サーバー側で再計算できない）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "消すチャートの ID（list_charts で確認できる）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "transit",
+    "title": "トランジットを見る",
+    "description": "登録済みのチャートに対して、指定時刻の天体（トランジット）を計算する。返るのは (1) トランジット天体の星座・度数・逆行、(2) それがネイタルのカスプで見て第何ハウスに入っているか、(3) ネイタル天体および ASC / MC とのアスペクト（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、オーブ 1°）。\n日時をすべて省略すると**現在時刻（UTC）**で計算する。特定の日を見たいときは year / month / day を指定し、必要なら hour / minute と utc_offset（その時刻がどの時差の土地の時計か）を添える。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "year": {
+          "type": "integer",
+          "description": "見たい日の年（省略すると現在時刻）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "見たい日の月（1-12）"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "見たい日の日（1-31）"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "description": "見たい時刻の「時」（0-23、省略すると 0 時）"
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59,
+          "description": "見たい時刻の「分」（0-59、省略すると 0 分）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "指定した日時がどの時差の土地の時計か（時間単位。日本時間なら 9。省略すると UTC 扱い）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "lunar_return",
+    "title": "ルナリターン（月の帰還）",
+    "description": "登録済みチャートの**ネイタルの月**と同じ黄経に、空の月が戻ってくる瞬間（ルナリターン）を求め、その瞬間のホロスコープ一式を返す。約27.3日に1回めぐってくる。\nyear と month を指定すると**その月に入るリターンをすべて**返す（たいてい1回、暦月の並びによっては2回、まれに0回）。両方省略すると**現在時刻から見て次の1回**。year と month はそろえて指定すること。\n返るのは (1) リターンの瞬間（UTC。utc_offset を渡せばその土地の時計でも）、(2) リターン図の11天体（星座・度数・逆行・在ハウスはリターン図自身のカスプで）、(3) リターン図の ASC / MC とハウスカスプ、(4) ネイタルの天体・ASC / MC とのアスペクト（メジャー5種・オーブ 1°）。\nリターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」（save_chart の default_lat / default_lng）を使う。どちらも無いときは場所を教えてほしい旨を返す。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "year": {
+          "type": "integer",
+          "description": "見たい年（month とそろえて指定。省略すると現在時刻から見て次の1回）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "見たい月（1-12。year とそろえて指定）"
+        },
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "リターン図を立てる場所の緯度（省略するとチャートの「いつもの場所」）"
+        },
+        "lng": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "リターン図を立てる場所の経度（lat とそろえて指定）"
+        },
+        "location_label": {
+          "type": "string",
+          "description": "その場所の呼び名（任意。例: 東京）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "表示に使う時差（時間単位。日本時間なら 9。省略すると UTC だけで表示する）。year / month を指定したときは、暦月の区切りもこの時差の土地の暦で見る。"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "solar_return",
+    "title": "ソーラーリターン（太陽の帰還）",
+    "description": "登録済みチャートの**ネイタルの太陽**と同じ黄経に、空の太陽が戻ってくる瞬間（ソーラーリターン）を求め、その瞬間のホロスコープ一式を返す。年に1回、誕生日の前後1日ほどの範囲でめぐってくる。\nyear を指定するとその年の1回を返す（その年の1月1日から探す）。省略すると**現在時刻から見て次の1回**。\n返るものは lunar_return と同じ形——リターンの瞬間、リターン図の11天体（在ハウスはリターン図自身のカスプ）、ASC / MC とハウスカスプ、ネイタルとのアスペクト（メジャー5種・オーブ 1°）。\nリターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」を使う。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "year": {
+          "type": "integer",
+          "description": "見たい年（省略すると現在時刻から見て次の1回）"
+        },
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "リターン図を立てる場所の緯度（省略するとチャートの「いつもの場所」）"
+        },
+        "lng": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "リターン図を立てる場所の経度（lat とそろえて指定）"
+        },
+        "location_label": {
+          "type": "string",
+          "description": "その場所の呼び名（任意。例: 東京）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "表示に使う時差（時間単位。日本時間なら 9。省略すると UTC だけで表示する）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "progressions",
+    "title": "プログレッション（二次進行）",
+    "description": "二次進行（セカンダリー・プログレッション／一日一年法）を計算する。出生の翌日の空を1歳、翌々日を2歳と読む技法で、進行天体・進行 ASC / MC と、それらがネイタルに落とすアスペクト（メジャー5種・オーブ 1°）を返す。\n**このツールだけは出生の原本（日時・場所）が要るため、原本をサーバーに預けた本人の URL でしか動かない。**chart_id は取らない——原本から毎回ネイタルを引き直すので、登録済みチャートとの取り違えが起きない。使えない URL では、その旨だけを返す。\nyear / month / day を省略すると今日で計算する。返却テキストに出生日時・出生地そのものは出さない。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "year": {
+          "type": "integer",
+          "description": "見たい日の年（month / day とそろえて指定。省略すると今日）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "見たい日の月（1-12）"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "見たい日の日（1-31）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "表示に使う時差（時間単位。日本時間なら 9）。日付を省略したときの「今日」もこの時差の土地の暦で決める（省略すると UTC）"
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  }
+];

@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+dist/
+
+# 作業用ドキュメント（ローカル専用。公開リポには含めない）
+AGENTS.md
+CLAUDE.md

@@ -1,0 +1,95 @@
+{
+  "id": "tarot",
+  "name": "タロット大アルカナ",
+  "has_reversed": true,
+  "cards": [
+    {
+      "name": "愚者",
+      "name_en": "The Fool"
+    },
+    {
+      "name": "魔術師",
+      "name_en": "The Magician"
+    },
+    {
+      "name": "女教皇",
+      "name_en": "The High Priestess"
+    },
+    {
+      "name": "女帝",
+      "name_en": "The Empress"
+    },
+    {
+      "name": "皇帝",
+      "name_en": "The Emperor"
+    },
+    {
+      "name": "教皇",
+      "name_en": "The Hierophant"
+    },
+    {
+      "name": "恋人たち",
+      "name_en": "The Lovers"
+    },
+    {
+      "name": "戦車",
+      "name_en": "The Chariot"
+    },
+    {
+      "name": "力",
+      "name_en": "Strength"
+    },
+    {
+      "name": "隠者",
+      "name_en": "The Hermit"
+    },
+    {
+      "name": "運命の輪",
+      "name_en": "Wheel of Fortune"
+    },
+    {
+      "name": "正義",
+      "name_en": "Justice"
+    },
+    {
+      "name": "吊るされた男",
+      "name_en": "The Hanged Man"
+    },
+    {
+      "name": "死神",
+      "name_en": "Death"
+    },
+    {
+      "name": "節制",
+      "name_en": "Temperance"
+    },
+    {
+      "name": "悪魔",
+      "name_en": "The Devil"
+    },
+    {
+      "name": "塔",
+      "name_en": "The Tower"
+    },
+    {
+      "name": "星",
+      "name_en": "The Star"
+    },
+    {
+      "name": "月",
+      "name_en": "The Moon"
+    },
+    {
+      "name": "太陽",
+      "name_en": "The Sun"
+    },
+    {
+      "name": "審判",
+      "name_en": "Judgement"
+    },
+    {
+      "name": "世界",
+      "name_en": "The World"
+    }
+  ]
+}

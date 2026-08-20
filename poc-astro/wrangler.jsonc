@@ -1,0 +1,21 @@
+/**
+ * PoC 専用の Wrangler 設定 —— Swiss Ephemeris WASM が Workers（workerd）で動くかの検証だけに使う。
+ *
+ * ⚠ この設定は **デプロイしない**。`wrangler dev` でローカル検証するためだけのもの。
+ *    本番（fortune-gatekeeper）の wrangler.jsonc とは完全に別物で、互いに参照もしない。
+ *
+ * 使い方: リポジトリ直下で
+ *   $env:WRANGLER_SEND_METRICS="false"; npx wrangler dev -c poc-astro/wrangler.jsonc
+ */
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "fortune-astro-poc",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-08-01",
+  "dev": {
+    // 8788 は vault-gatekeeper、8789 は fortune-gatekeeper 本体が使うので 8790 を借りる
+    "port": 8790
+  },
+  // 公開しない。workers.dev のサブドメインも作らず、ルートも張らない
+  "workers_dev": false
+}
