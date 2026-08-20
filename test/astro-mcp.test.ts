@@ -121,6 +121,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(instructions).toContain("list_charts");
     expect(instructions).toContain("transit");
     expect(instructions).toContain("delete_chart");
+    expect(instructions).toContain("update_default_location");
     expect(instructions).toContain("lunar_return");
     expect(instructions).toContain("solar_return");
     // 二次進行は「原本を預けた本人だけ」と断ってある
@@ -142,7 +143,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("7 本のツールを返す", async () => {
+  it("8 本のツールを返す", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -153,6 +154,7 @@ describe("占星術層の initialize / tools/list", () => {
       "lunar_return",
       "solar_return",
       "progressions",
+      "update_default_location",
     ]);
   });
 
@@ -217,6 +219,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
       "lunar_return",
       "solar_return",
       "progressions",
+      "update_default_location",
     ]);
   });
 
@@ -756,6 +759,204 @@ describe("solar_return", () => {
 });
 
 // ---------------------------------------------------------------------------
+// いつもの場所の差し替え
+// ---------------------------------------------------------------------------
+
+describe("update_default_location", () => {
+  it("いつもの場所だけ差し替わり、一覧とリターンに反映される", async () => {
+    const chartId = await saveChartWithHome(); // 東京
+    const before = JSON.parse(kv.store.get(`chart:user1:${chartId}`) as string);
+
+    const result = await call("update_default_location", {
+      chart_id: chartId,
+      lat: 34.6937,
+      lng: 135.5023,
+      location_label: "大阪",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain(
+      `チャート ${chartId}（サンプル）の「いつもの場所」を更新しました。`,
+    );
+    expect(result.content[0].text).toContain("いつもの場所: 大阪 緯度 34.6937 / 経度 135.5023");
+    expect(result.content[0].text).toContain("保存済みの計算結果");
+    expect(result.structuredContent).toEqual({
+      chart_id: chartId,
+      default_location: { lat: 34.6937, lng: 135.5023, label: "大阪" },
+    });
+
+    // 計算結果（天体・カスプ・ASC/MC）もラベル・ハウス方式・登録日時も動かない
+    const after = JSON.parse(kv.store.get(`chart:user1:${chartId}`) as string);
+    expect(after.planets).toEqual(before.planets);
+    expect(after.cusps).toEqual(before.cusps);
+    expect(after.ascmc).toEqual(before.ascmc);
+    expect(after.label).toBe(before.label);
+    expect(after.house_system).toBe(before.house_system);
+    expect(after.created).toBe(before.created);
+    // 再計算していない（エンジンを呼びに行かない）
+    const houseCallsBefore = engine.houseCalls.length;
+
+    const listed = await call("list_charts");
+    expect(listed.structuredContent.charts[0].default_location).toEqual({
+      lat: 34.6937,
+      lng: 135.5023,
+      label: "大阪",
+    });
+    expect(listed.content[0].text).toContain("いつもの場所: 大阪（34.6937, 135.5023）");
+    expect(engine.houseCalls).toHaveLength(houseCallsBefore);
+
+    // 場所を省いたリターンが新しい土地で立つ
+    engine.moonAnchorJd = jdOf(2026, 8, 21, 3);
+    const returned = await call("lunar_return", { chart_id: chartId });
+    expect(returned.isError).toBeUndefined();
+    expect(returned.content[0].text).toContain(
+      "リターン図を立てた場所: 大阪（緯度 34.6937 / 経度 135.5023）",
+    );
+    const lastHouse = engine.houseCalls[engine.houseCalls.length - 1];
+    expect(lastHouse?.lat).toBe(34.6937);
+    expect(lastHouse?.lng).toBe(135.5023);
+  });
+
+  it("呼び名を省けば呼び名なしになる（前の呼び名は引き継がない）", async () => {
+    const chartId = await saveChartWithHome(); // 東京
+    const result = await call("update_default_location", {
+      chart_id: chartId,
+      lat: 51.5074,
+      lng: -0.1278,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.default_location).toEqual({ lat: 51.5074, lng: -0.1278 });
+    expect(result.content[0].text).toContain("いつもの場所: 緯度 51.5074 / 経度 -0.1278");
+    expect(result.content[0].text).not.toContain("東京");
+  });
+
+  it("いつもの場所を持たないチャートに、後から付け足せる", async () => {
+    const chartId = await saveDefaultChart(); // いつもの場所なし
+    const result = await call("update_default_location", {
+      chart_id: chartId,
+      lat: 35.6895,
+      lng: 139.6917,
+      location_label: "東京",
+    });
+    expect(result.isError).toBeUndefined();
+
+    engine.moonAnchorJd = jdOf(2026, 8, 21, 3);
+    const returned = await call("lunar_return", { chart_id: chartId });
+    expect(returned.isError).toBeUndefined();
+    expect(returned.content[0].text).toContain(
+      "リターン図を立てた場所: 東京（緯度 35.6895 / 経度 139.6917）",
+    );
+  });
+
+  it("clear: true で消える。以後リターンは場所を訊いてくる", async () => {
+    const chartId = await saveChartWithHome();
+
+    const cleared = await call("update_default_location", { chart_id: chartId, clear: true });
+    expect(cleared.isError).toBeUndefined();
+    expect(cleared.content[0].text).toContain(
+      "いつもの場所: 未設定（リターンは呼び出し時に場所を指定してください）",
+    );
+    expect(cleared.structuredContent.default_location).toBeNull();
+
+    const stored = JSON.parse(kv.store.get(`chart:user1:${chartId}`) as string);
+    expect(stored.default_location).toBeUndefined();
+    expect(stored.planets).toHaveLength(11);
+
+    const listed = await call("list_charts");
+    expect(listed.structuredContent.charts[0].default_location).toBeUndefined();
+    expect(listed.content[0].text).not.toContain("いつもの場所");
+
+    const returned = await call("lunar_return", { chart_id: chartId });
+    expect(returned.isError).toBe(true);
+    expect(returned.content[0].text).toContain("リターン図を立てる場所が分かりません");
+
+    // 場所を渡せばこれまで通り立つ
+    engine.moonAnchorJd = jdOf(2026, 8, 21, 3);
+    const withPlace = await call("lunar_return", { chart_id: chartId, lat: 35, lng: 139 });
+    expect(withPlace.isError).toBeUndefined();
+
+    // もともと持っていないチャートに clear をかけても素通り（冪等）
+    const again = await call("update_default_location", { chart_id: chartId, clear: true });
+    expect(again.isError).toBeUndefined();
+    expect(again.structuredContent.default_location).toBeNull();
+  });
+
+  it("lat / lng は両方そろえて。clear と場所は同時に指定できない", async () => {
+    const chartId = await saveChartWithHome();
+
+    const halfPlace = await call("update_default_location", { chart_id: chartId, lat: 35 });
+    expect(halfPlace.isError).toBe(true);
+    expect(halfPlace.content[0].text).toContain("lat と lng は両方そろえて");
+    expect((await call("update_default_location", { chart_id: chartId, lng: 139 })).isError).toBe(
+      true,
+    );
+
+    const nothing = await call("update_default_location", { chart_id: chartId });
+    expect(nothing.isError).toBe(true);
+    expect(nothing.content[0].text).toContain("clear: true");
+
+    const both = await call("update_default_location", {
+      chart_id: chartId,
+      clear: true,
+      lat: 34.6937,
+      lng: 135.5023,
+    });
+    expect(both.isError).toBe(true);
+    expect(both.content[0].text).toContain("clear と場所の指定は同時にできません");
+
+    const labelToo = await call("update_default_location", {
+      chart_id: chartId,
+      clear: true,
+      location_label: "大阪",
+    });
+    expect(labelToo.isError).toBe(true);
+
+    const outOfRange = await call("update_default_location", {
+      chart_id: chartId,
+      lat: 91,
+      lng: 0,
+    });
+    expect(outOfRange.isError).toBe(true);
+
+    const badClear = await call("update_default_location", { chart_id: chartId, clear: "yes" });
+    expect(badClear.isError).toBe(true);
+
+    // どのエラーでも「いつもの場所」は元のまま
+    const listed = await call("list_charts");
+    expect(listed.structuredContent.charts[0].default_location).toEqual({
+      lat: 35.6895,
+      lng: 139.6917,
+      label: "東京",
+    });
+  });
+
+  it("知らない chart_id・他人のチャートは丁寧に断る", async () => {
+    const missing = await call("update_default_location", {
+      chart_id: "nosuchid",
+      lat: 35,
+      lng: 139,
+    });
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain("チャート nosuchid が見つかりませんでした");
+    expect(missing.content[0].text).toContain("list_charts");
+
+    const chartId = await saveChartWithHome();
+    const other: AstroContext = {
+      ...context,
+      auth: { user: "tomodachi", name: "ともだち", role: "friend" },
+    };
+    const peek = await call(
+      "update_default_location",
+      { chart_id: chartId, lat: 0, lng: 0 },
+      other,
+    );
+    expect(peek.isError).toBe(true);
+    // 持ち主のチャートは無傷
+    const listed = await call("list_charts");
+    expect(listed.structuredContent.charts[0].default_location.label).toBe("東京");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 二次進行（オーナー特権）
 // ---------------------------------------------------------------------------
 
@@ -1241,6 +1442,51 @@ const FROZEN_ASTRO_TOOLS = [
     },
     "annotations": {
       "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_default_location",
+    "title": "いつもの場所を差し替える",
+    "description": "登録済みチャートの「いつもの場所」（リターン計算で使う土地）だけを差し替える。**出生データの再入力は不要で、保存済みの計算結果（天体・カスプ・ASC/MC）には一切触れない**——「いつもの場所」は出生データとは無関係の覚え書きなので、差し替えても図は変わらない。\n引っ越したとき、あるいはリターンをこれから別の土地で立てたくなったときに使う。lat と lng は両方そろえて指定すること。\nclear: true にすると「いつもの場所」を削除する（以後、lunar_return / solar_return は呼び出しのたびに lat / lng の指定が必要になる）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "lat": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "新しい「いつもの場所」の緯度（北緯が正。lng とそろえて指定）"
+        },
+        "lng": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180,
+          "description": "新しい「いつもの場所」の経度（東経が正。lat とそろえて指定）"
+        },
+        "location_label": {
+          "type": "string",
+          "description": "その場所の呼び名（任意。例: 東京）"
+        },
+        "clear": {
+          "type": "boolean",
+          "default": false,
+          "description": "true にすると「いつもの場所」を削除する（lat / lng と同時には指定できない）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
       "openWorldHint": false
     }
   }

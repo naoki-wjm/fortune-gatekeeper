@@ -79,6 +79,8 @@ const ASTRO_INSTRUCTIONS =
   "使い分け: save_chart=出生データを登録して chart_id を得る / list_charts=登録済みの一覧 / " +
   "transit=登録したチャートに対する任意時刻（省略時は現在）の天体・在ハウス・アスペクト / " +
   "delete_chart=登録の取り消し / " +
+  "update_default_location=「いつもの場所」だけの差し替え（引っ越したときなど。" +
+  "出生データの再入力は要らず、計算済みの座標にも触りません） / " +
   "lunar_return=ネイタルの月に空の月が戻る瞬間（約27.3日に1回）とその図 / " +
   "solar_return=ネイタルの太陽に空の太陽が戻る瞬間（年に1回・誕生日のころ）とその図 / " +
   "progressions=二次進行（一日一年法）。progressions だけは出生の原本が要るため、" +
@@ -399,6 +401,57 @@ export const ASTRO_TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "update_default_location",
+    title: "いつもの場所を差し替える",
+    description:
+      "登録済みチャートの「いつもの場所」（リターン計算で使う土地）だけを差し替える。" +
+      "**出生データの再入力は不要で、保存済みの計算結果（天体・カスプ・ASC/MC）には一切触れない**——" +
+      "「いつもの場所」は出生データとは無関係の覚え書きなので、差し替えても図は変わらない。\n" +
+      "引っ越したとき、あるいはリターンをこれから別の土地で立てたくなったときに使う。" +
+      "lat と lng は両方そろえて指定すること。\n" +
+      "clear: true にすると「いつもの場所」を削除する" +
+      "（以後、lunar_return / solar_return は呼び出しのたびに lat / lng の指定が必要になる）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chart_id: {
+          type: "string",
+          description: "対象のチャート ID（list_charts で確認できる）",
+        },
+        lat: {
+          type: "number",
+          minimum: -90,
+          maximum: 90,
+          description: "新しい「いつもの場所」の緯度（北緯が正。lng とそろえて指定）",
+        },
+        lng: {
+          type: "number",
+          minimum: -180,
+          maximum: 180,
+          description: "新しい「いつもの場所」の経度（東経が正。lat とそろえて指定）",
+        },
+        location_label: {
+          type: "string",
+          description: "その場所の呼び名（任意。例: 東京）",
+        },
+        clear: {
+          type: "boolean",
+          default: false,
+          description:
+            "true にすると「いつもの場所」を削除する（lat / lng と同時には指定できない）",
+        },
+      },
+      required: ["chart_id"],
+      additionalProperties: false,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -478,6 +531,13 @@ function optionalString(
     throw new AstroError(`${key} は ${maxLength} 文字以内にしてください`);
   }
   return trimmed;
+}
+
+function optionalBoolean(args: Record<string, unknown>, key: string): boolean | undefined {
+  const value = args[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") throw new AstroError(`${key} は true / false で指定してください`);
+  return value;
 }
 
 function requireString(args: Record<string, unknown>, key: string, maxLength: number): string {
@@ -732,6 +792,74 @@ async function runDeleteChart(rawArguments: unknown, context: AstroContext): Pro
   return {
     content: [{ type: "text", text: `チャート ${chartId}（${existing.label}）を削除しました。` }],
     structuredContent: { chart_id: chartId, deleted: true },
+  };
+}
+
+/**
+ * 「いつもの場所」だけの差し替え。
+ *
+ * 出生データと無関係な覚え書きなので、原本レス設計と衝突しない ―― 計算済みの座標
+ * （planets / cusps / ascmc）にも label / house_system / created にも触らず、
+ * default_location だけを置き換える（または消す）。再計算も要らない。
+ */
+async function runUpdateDefaultLocation(
+  rawArguments: unknown,
+  context: AstroContext,
+): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const chartId = requireString(args, "chart_id", 32);
+
+  const chart = await getChart(context.kv, context.auth.user, chartId);
+  if (!chart) {
+    return toolError(
+      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
+        "save_chart で登録してください。",
+    );
+  }
+
+  const clear = optionalBoolean(args, "clear") ?? false;
+  const lat = optionalNumber(args, "lat", -90, 90);
+  const lng = optionalNumber(args, "lng", -180, 180);
+  const label = optionalString(args, "location_label", 40);
+
+  if (clear) {
+    if (lat !== undefined || lng !== undefined || label !== undefined) {
+      throw new AstroError(
+        "clear と場所の指定は同時にできません" +
+          "（消すなら clear: true だけ、差し替えるなら lat / lng を指定してください）",
+      );
+    }
+    delete chart.default_location;
+  } else {
+    if ((lat === undefined) !== (lng === undefined)) {
+      throw new AstroError("lat と lng は両方そろえて指定してください");
+    }
+    if (lat === undefined || lng === undefined) {
+      throw new AstroError(
+        "新しい「いつもの場所」を lat / lng で指定してください" +
+          "（登録を消したいときは clear: true）",
+      );
+    }
+    const place: { lat: number; lng: number; label?: string } = { lat, lng };
+    if (label) place.label = label;
+    chart.default_location = place;
+  }
+
+  await putChart(context.kv, context.auth.user, chartId, chart);
+
+  const place = chart.default_location;
+  const lines = [`チャート ${chartId}（${chart.label}）の「いつもの場所」を更新しました。`];
+  if (place) {
+    const name = place.label ? `${place.label} ` : "";
+    lines.push(`いつもの場所: ${name}緯度 ${place.lat} / 経度 ${place.lng}`);
+  } else {
+    lines.push("いつもの場所: 未設定（リターンは呼び出し時に場所を指定してください）");
+  }
+  lines.push("保存済みの計算結果（天体・カスプ・ASC/MC）はそのままです。");
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: { chart_id: chartId, default_location: place ?? null },
   };
 }
 
@@ -1299,6 +1427,9 @@ async function callAstroTool(
     if (name === "save_chart") return await runSaveChart(rawArguments, context);
     if (name === "list_charts") return await runListCharts(context);
     if (name === "delete_chart") return await runDeleteChart(rawArguments, context);
+    if (name === "update_default_location") {
+      return await runUpdateDefaultLocation(rawArguments, context);
+    }
     if (name === "transit") return await runTransit(rawArguments, context);
     if (name === "lunar_return") return await runReturn("moon", rawArguments, context);
     if (name === "solar_return") return await runReturn("sun", rawArguments, context);
