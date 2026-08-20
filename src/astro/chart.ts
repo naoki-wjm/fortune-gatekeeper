@@ -194,7 +194,14 @@ export function getAspect(deg1: number, deg2: number, orb: number = DEFAULT_ORB)
   return null;
 }
 
-/** 接近中（applying）か。calc.js の isApplying と同じく 1 日後のオーブと比べる */
+/**
+ * 接近中（applying）か。オーブが縮む向きに動いているか＝瞬間の変化率で判定する。
+ *
+ * 移植元 calc.js は「1 日後のオーブと今のオーブを比べる」方式だが、月（約 13°/日）のように
+ * 1 日で離角がアスペクトを丸ごと通過する天体では、接近中でも「1 日後にはもう通過後で遠い」
+ * ため常に離反と誤判定される（オーブ 1° 運用では月のアスペクトがほぼ全滅、太陽・水星・金星も
+ * オーブが日速の半分未満だと同罪）。変化率なら足の速さに関係なく正しい（2026-08-20 修正）。
+ */
 export function isApplying(
   deg1: number,
   deg2: number,
@@ -205,14 +212,13 @@ export function isApplying(
   let diff = deg1 - deg2;
   if (diff > 180) diff -= 360;
   if (diff < -180) diff += 360;
-  const currentOrb = Math.abs(Math.abs(diff) - aspectAngle);
 
-  let futureDiff = deg1 + speed1 - (deg2 + speed2);
-  if (futureDiff > 180) futureDiff -= 360;
-  if (futureDiff < -180) futureDiff += 360;
-  const futureOrb = Math.abs(Math.abs(futureDiff) - aspectAngle);
-
-  return futureOrb < currentOrb;
+  // |diff| の変化率。diff の符号で「差が開く向き」が決まる
+  const absDiffRate = (diff >= 0 ? 1 : -1) * (speed1 - speed2);
+  // オーブ＝| |diff| − アスペクト角 |。ぴったり成立の瞬間は「接近」とは言わない
+  const orbSigned = Math.abs(diff) - aspectAngle;
+  if (orbSigned === 0) return false;
+  return (orbSigned > 0 ? absDiffRate : -absDiffRate) < 0;
 }
 
 /** アスペクトを探す相手（天体でも ASC/MC でもよい） */
