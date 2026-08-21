@@ -146,12 +146,13 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("10 本のツールを返す", async () => {
+  it("11 本のツールを返す", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
       "save_chart",
       "list_charts",
+      "get_chart",
       "delete_chart",
       "transit",
       "lunar_return",
@@ -219,6 +220,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
     expect(tools.json.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
       "save_chart",
       "list_charts",
+      "get_chart",
       "delete_chart",
       "transit",
       "lunar_return",
@@ -418,6 +420,108 @@ describe("list_charts / delete_chart", () => {
     expect(again.content[0].text).toContain("見つかりませんでした");
 
     expect((await call("list_charts")).structuredContent.charts).toEqual([]);
+  });
+});
+
+describe("get_chart", () => {
+  it("保存済みの座標を読み直し、出生図の中のアスペクトを足して返す（エンジンは呼ばない）", async () => {
+    const chartId = await saveDefaultChart();
+    const juldaysBefore = engine.juldays.length;
+    const houseCallsBefore = engine.houseCalls.length;
+
+    const result = await call("get_chart", { chart_id: chartId });
+    expect(result.isError).toBeUndefined();
+    // 読み直しは KV だけ。ユリウス日もハウスも計算し直さない
+    expect(engine.juldays.length).toBe(juldaysBefore);
+    expect(engine.houseCalls.length).toBe(houseCallsBefore);
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("出生図（ネイタル）");
+    expect(text).toContain(`チャート: サンプル（${chartId}） / ハウス方式: プラシーダス（P）`);
+    expect(text).toContain("■ ネイタル天体");
+    expect(text).toContain("太陽 牡羊座 0°00′ (10H)");
+    expect(text).toContain("金星 蟹座 0°00′ (1H)（逆行）");
+    expect(text).toContain("Nノード 魚座 0°00′");
+    expect(text).toContain("ASC 蟹座 0°00′ / MC 水瓶座 0°00′");
+    expect(text).toContain("■ ハウスカスプ");
+    expect(text).toContain("1H 蟹座 0°00′ / 2H 獅子座 0°00′");
+    expect(text).toContain("■ ネイタル内アスペクト（メジャー5種・オーブ 5.0°・10 天体＋ASC/MC、ノード除く）");
+    // 偽エンジンは 30° 刻み＝太陽 0°・水星 60°・金星 90°・火星 120°・土星 180°、ASC 90°
+    expect(text).toContain("太陽 ⚹ 水星（セクスタイル / オーブ 0.00°）");
+    expect(text).toContain("太陽 □ 金星（スクエア / オーブ 0.00°）");
+    expect(text).toContain("太陽 △ 火星（トライン / オーブ 0.00°）");
+    expect(text).toContain("太陽 ☍ 土星（オポジション / オーブ 0.00°）");
+    expect(text).toContain("金星 ☌ ASC（コンジャンクション / オーブ 0.00°）");
+    // 止まった図なので接近・離反は書かない。ノードはアスペクトに出さない
+    expect(text).not.toContain("接近");
+    expect(text).not.toContain("離反");
+    const aspectSection = text.slice(text.indexOf("■ ネイタル内アスペクト"));
+    expect(aspectSection).not.toContain("Nノード");
+
+    const structured = result.structuredContent;
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.house_system).toBe("P");
+    expect(structured.planets).toHaveLength(11);
+    expect(structured.planets[0]).toMatchObject({ id: 0, name: "太陽", lon: 0, house: 10 });
+    expect(structured.angles).toEqual({ asc: 90, mc: 300 });
+    expect(structured.cusps).toHaveLength(12);
+    expect(structured.cusps[0]).toBe(90);
+    expect(structured.orb).toBe(5);
+    expect(structured.natal_aspects.length).toBeGreaterThan(0);
+    for (const hit of structured.natal_aspects) {
+      expect(hit.a).not.toBe("Nノード");
+      expect(hit.b).not.toBe("Nノード");
+      expect(hit).not.toHaveProperty("applying");
+    }
+    // 出生日時・出生地は読み直しても出てこない（そもそも持っていない）
+    expect(text).not.toContain("1990");
+    expect(JSON.stringify(structured)).not.toContain("139.6917");
+  });
+
+  it("いつもの場所があれば見出しに添える", async () => {
+    const result = await call("save_chart", {
+      ...BIRTH,
+      default_lat: 34.6937,
+      default_lng: 135.5023,
+      default_location_label: "大阪",
+    });
+    const chartId: string = result.structuredContent.chart_id;
+    const read = await call("get_chart", { chart_id: chartId });
+    expect(read.content[0].text).toContain("いつもの場所: 大阪（34.6937, 135.5023）");
+    expect(read.structuredContent.default_location).toEqual({
+      lat: 34.6937,
+      lng: 135.5023,
+      label: "大阪",
+    });
+  });
+
+  it("orb を指定すると見出しと structuredContent に反映される。範囲外は断る", async () => {
+    const chartId = await saveDefaultChart();
+    const narrow = await call("get_chart", { chart_id: chartId, orb: 2 });
+    expect(narrow.isError).toBeUndefined();
+    expect(narrow.content[0].text).toContain("オーブ 2.0°");
+    expect(narrow.structuredContent.orb).toBe(2);
+
+    for (const orb of [0.1, 20]) {
+      const bad = await call("get_chart", { chart_id: chartId, orb });
+      expect(bad.isError).toBe(true);
+      expect(bad.content[0].text).toContain("orb");
+    }
+  });
+
+  it("知らない chart_id・他人のチャートは丁寧に断る", async () => {
+    const missing = await call("get_chart", { chart_id: "nosuchid" });
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain("チャート nosuchid が見つかりませんでした");
+    expect(missing.content[0].text).toContain("list_charts");
+
+    const chartId = await saveDefaultChart();
+    const other: AstroContext = {
+      ...context,
+      auth: { user: "tomodachi", name: "ともだち", role: "friend" },
+    };
+    const peek = await call("get_chart", { chart_id: chartId }, other);
+    expect(peek.isError).toBe(true);
   });
 });
 
@@ -1532,6 +1636,34 @@ const FROZEN_ASTRO_TOOLS = [
     "inputSchema": {
       "type": "object",
       "properties": {},
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_chart",
+    "title": "出生図を読み直す",
+    "description": "save_chart で登録したネイタルチャート（出生図）を chart_id から読み直す。返るのは (1) ネイタル天体の星座・度数・逆行と在ハウス、(2) ASC / MC とハウスカスプ、(3) **出生図の中のアスペクト**（ネイタル内アスペクト。10 天体＋ASC / MC の総当たり、メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション）。\n保存済みの座標を読むだけで計算し直さないので、ハウス方式を変えたいときは save_chart で登録し直すこと（出生日時・出生地は保存していない）。\nネイタルの読み直し・出生図そのものを話題にするときはこれ（transit は「今の空」用）。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "orb": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 10,
+          "description": "ネイタル内アスペクトのオーブ（度）。省略すると 5°（出生図は広めに取るのが通例。トランジットの 1° とは別）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
       "additionalProperties": false
     },
     "annotations": {

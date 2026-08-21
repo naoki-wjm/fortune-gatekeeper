@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CALC_FLAGS,
+  DEFAULT_NATAL_ORB,
   anglesOf,
   computeChart,
   computePlanets,
@@ -9,6 +10,7 @@ import {
   formatCrossAspect,
   formatCuspLine,
   formatDegree,
+  formatNatalAspect,
   formatPlanetLine,
   getAspect,
   getHouse,
@@ -16,6 +18,7 @@ import {
   isApplying,
   julianDay,
   mcToArmc,
+  natalAspects,
   normalizeDegree,
   planetName,
   signIndex,
@@ -158,6 +161,49 @@ describe("アスペクトの判定", () => {
     expect(hits[1]?.natal).toBe("太陽");
     expect(formatCrossAspect(hits[1]!)).toContain("T.木星 ☌ N.太陽");
     expect(formatCrossAspect(hits[1]!)).toContain("オーブ 0.80°");
+  });
+
+  it("出生図の中のアスペクトは i < j の組だけ（自分同士・裏返しの重複なし）、オーブの狭い順", () => {
+    const points = [
+      { name: "太陽", lon: 0, speed: 0 },
+      { name: "月", lon: 92, speed: 0 },
+      { name: "水星", lon: 3, speed: 0 },
+      { name: "ASC", lon: 180.5, speed: 0 },
+      { name: "MC", lon: 90, speed: 0 },
+    ];
+    const hits = natalAspects(points);
+    // 組の数は n(n-1)/2 を超えない
+    expect(hits.length).toBeLessThanOrEqual((points.length * (points.length - 1)) / 2);
+    // 同じ組が裏返しで 2 回出てこない。自分同士も出ない
+    const keys = hits.map((hit) => [hit.a, hit.b].sort().join("|"));
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const hit of hits) expect(hit.a).not.toBe(hit.b);
+    // a は点列で先に出てくる側
+    const order = new Map(points.map((point, index) => [point.name, index]));
+    for (const hit of hits) expect(order.get(hit.a)!).toBeLessThan(order.get(hit.b)!);
+    // 狭い順
+    for (let i = 1; i < hits.length; i++) {
+      expect(hits[i]!.aspect.orb).toBeGreaterThanOrEqual(hits[i - 1]!.aspect.orb);
+    }
+    // 太陽–MC（90°ぴったり）が先頭、太陽–ASC（180.5°）・太陽–水星（3°）・月–MC（2°）も拾う
+    expect(hits[0]).toMatchObject({ a: "太陽", b: "MC" });
+    expect(hits[0]?.aspect.orb).toBe(0);
+    expect(hits.map((hit) => `${hit.a}-${hit.b}`)).toEqual(
+      expect.arrayContaining(["太陽-ASC", "太陽-水星", "月-MC", "月-水星"]),
+    );
+    // applying は付けない（止まった図）
+    expect(hits[0]).not.toHaveProperty("applying");
+    expect(formatNatalAspect(hits[0]!)).toBe("太陽 □ MC（スクエア / オーブ 0.00°）");
+  });
+
+  it("出生図のオーブは既定 5°（トランジットの 1° より広い）。1° にすれば 3° 離れた合は落ちる", () => {
+    const points = [
+      { name: "太陽", lon: 0, speed: 0 },
+      { name: "水星", lon: 3, speed: 0 },
+    ];
+    expect(DEFAULT_NATAL_ORB).toBe(5);
+    expect(natalAspects(points)).toHaveLength(1);
+    expect(natalAspects(points, 1)).toHaveLength(0);
   });
 });
 

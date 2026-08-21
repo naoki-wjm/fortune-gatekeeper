@@ -21,6 +21,7 @@ import {
 } from "../mcp";
 import {
   AstroError,
+  DEFAULT_NATAL_ORB,
   DEFAULT_ORB,
   HOUSE_SYSTEM_CODES,
   anglesOf,
@@ -33,10 +34,12 @@ import {
   formatCrossAspect,
   formatCuspLine,
   formatDegree,
+  formatNatalAspect,
   formatPlanetLines,
   getHouse,
   houseSystemName,
   julianDay,
+  natalAspects,
   planetName,
   type AspectPoint,
   type ComputedChart,
@@ -87,6 +90,8 @@ const ASTRO_INSTRUCTIONS =
   "**出生日時と出生地は計算に使ったあと捨てます**。" +
   "そのためハウス方式を変えて引き直したいときは、もう一度 save_chart を呼んでもらう必要があります。\n" +
   "使い分け: save_chart=出生データを登録して chart_id を得る / list_charts=登録済みの一覧 / " +
+  "get_chart=登録済みの出生図を読み直す（天体・ASC/MC・カスプ・出生図の中のアスペクト。" +
+  "transit は今の空、こちらは生まれたときの空） / " +
   "transit=登録したチャートに対する任意時刻（省略時は現在）の天体・在ハウス・アスペクト / " +
   "delete_chart=登録の取り消し / " +
   "update_default_location=「いつもの場所」だけの差し替え（引っ越したときなど。" +
@@ -197,6 +202,39 @@ export const ASTRO_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {},
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "get_chart",
+    title: "出生図を読み直す",
+    description:
+      "save_chart で登録したネイタルチャート（出生図）を chart_id から読み直す。" +
+      "返るのは (1) ネイタル天体の星座・度数・逆行と在ハウス、(2) ASC / MC とハウスカスプ、" +
+      "(3) **出生図の中のアスペクト**（ネイタル内アスペクト。10 天体＋ASC / MC の総当たり、" +
+      "メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション）。\n" +
+      "保存済みの座標を読むだけで計算し直さないので、ハウス方式を変えたいときは " +
+      "save_chart で登録し直すこと（出生日時・出生地は保存していない）。\n" +
+      "ネイタルの読み直し・出生図そのものを話題にするときはこれ（transit は「今の空」用）。\n" +
+      "このツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chart_id: {
+          type: "string",
+          description: "対象のチャート ID（list_charts で確認できる）",
+        },
+        orb: {
+          type: "number",
+          minimum: 0.5,
+          maximum: 10,
+          description:
+            "ネイタル内アスペクトのオーブ（度）。省略すると 5°" +
+            "（出生図は広めに取るのが通例。トランジットの 1° とは別）",
+        },
+      },
+      required: ["chart_id"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -798,13 +836,22 @@ async function engineOf(context: AstroContext): Promise<SwissEph> {
  * 速度を 0 で置くのは意図的 ―― ネイタルは「止まっている図」なので、接近／離反は
  * 動いているトランジット側だけで決まる。移植元の calc.js はネイタルの速度もそのまま
  * 渡していて、同じ速度の天体同士だと接近判定が常に false になる（実害の小さい癖）。
+ *
+ * excludeNodes: true でノース ノード（id 11）を落とす。図の中のアスペクト（get_chart）は
+ * events.ts と同じ方針で **ノードを相手にも動く側にも入れない**（位置は一覧に出す）。
  */
-function aspectPointsOf(chart: {
-  planets: readonly { id: number; lon: number }[];
-  cusps: readonly number[];
-  ascmc: readonly number[];
-}): AspectPoint[] {
-  const points: AspectPoint[] = chart.planets.map((planet) => ({
+function aspectPointsOf(
+  chart: {
+    planets: readonly { id: number; lon: number }[];
+    cusps: readonly number[];
+    ascmc: readonly number[];
+  },
+  options: { excludeNodes?: boolean } = {},
+): AspectPoint[] {
+  const planets = options.excludeNodes
+    ? chart.planets.filter((planet) => planet.id !== 11)
+    : chart.planets;
+  const points: AspectPoint[] = planets.map((planet) => ({
     name: planetName(planet.id),
     lon: planet.lon,
     speed: 0,
@@ -923,6 +970,87 @@ async function runListCharts(context: AstroContext): Promise<ToolResult> {
   return {
     content: [{ type: "text", text: lines.join("\n") }],
     structuredContent: { charts },
+  };
+}
+
+/**
+ * 保存済みチャートの読み直し。
+ *
+ * 天体計算はしない ―― KV に入っている座標をそのまま整形するだけなので wasm を呼ばない
+ * （engineOf も通らない）。save_chart の返り値では見えないもの、すなわち
+ * **出生図の中のアスペクト**を足すのがこのツールの持ち場。
+ */
+async function runGetChart(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const chartId = requireString(args, "chart_id", 32);
+
+  const chart = await getChart(context.kv, context.auth.user, chartId);
+  if (!chart) {
+    return toolError(
+      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
+        "save_chart で登録してください。",
+    );
+  }
+
+  const orb = optionalNumber(args, "orb", 0.5, 10) ?? DEFAULT_NATAL_ORB;
+  // ノードはアスペクトの相手にも入れない（位置は下の天体一覧に出る）
+  const aspects = natalAspects(aspectPointsOf(chart, { excludeNodes: true }), orb);
+
+  const angles = anglesOf(chart);
+  const lines: string[] = [
+    "出生図（ネイタル）",
+    `チャート: ${chart.label}（${chartId}） / ハウス方式: ${houseSystemName(chart.house_system)}（${chart.house_system}） / 登録 ${chart.created}`,
+  ];
+  if (chart.default_location) {
+    const place = chart.default_location;
+    const name = place.label ? `${place.label}（${place.lat}, ${place.lng}）` : `${place.lat}, ${place.lng}`;
+    lines.push(`いつもの場所: ${name}`);
+  }
+  lines.push("");
+
+  lines.push("■ ネイタル天体（カッコ内は在ハウス）");
+  lines.push(...formatPlanetLines(chart.planets, chart.cusps));
+  lines.push(formatAngles(angles));
+  lines.push("");
+
+  lines.push("■ ハウスカスプ");
+  lines.push(formatCuspLine(chart.cusps));
+  lines.push("");
+
+  lines.push(
+    `■ ネイタル内アスペクト（メジャー5種・オーブ ${orb.toFixed(1)}°・10 天体＋ASC/MC、ノード除く）`,
+  );
+  if (aspects.length === 0) {
+    lines.push(`該当なし（オーブ ${orb.toFixed(1)}° の範囲にメジャーアスペクトはありません）`);
+  } else {
+    lines.push(...aspects.map((hit) => formatNatalAspect(hit)));
+  }
+
+  const structuredPlanets = chart.planets.map((planet: PlanetPosition) => ({
+    id: planet.id,
+    name: planetName(planet.id),
+    lon: planet.lon,
+    speed: planet.speed,
+    retrograde: planet.speed < 0,
+    position: formatDegree(planet.lon),
+    house: getHouse(planet.lon, chart.cusps),
+  }));
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: {
+      chart_id: chartId,
+      label: chart.label,
+      house_system: chart.house_system,
+      created: chart.created,
+      ...(chart.default_location ? { default_location: chart.default_location } : {}),
+      planets: structuredPlanets,
+      angles,
+      // 保存形は [0] がダミーなので、返すのは 1..12 の 12 要素だけ
+      cusps: chart.cusps.slice(1, 13),
+      orb,
+      natal_aspects: aspects,
+    },
   };
 }
 
@@ -1870,6 +1998,7 @@ async function callAstroTool(
   try {
     if (name === "save_chart") return await runSaveChart(rawArguments, context);
     if (name === "list_charts") return await runListCharts(context);
+    if (name === "get_chart") return await runGetChart(rawArguments, context);
     if (name === "delete_chart") return await runDeleteChart(rawArguments, context);
     if (name === "update_default_location") {
       return await runUpdateDefaultLocation(rawArguments, context);

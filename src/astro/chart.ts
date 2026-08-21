@@ -106,6 +106,12 @@ export const ASPECTS: readonly { angle: number; name: string; symbol: string }[]
 /** クロスアスペクトの既定オーブ（度）。トランジットは狭く取る */
 export const DEFAULT_ORB = 1;
 
+/**
+ * 出生図の中のアスペクト（ネイタル内アスペクト）の既定オーブ（度）。
+ * astro-viewer `shared/data.js` の `orbs.natal` と同じ値 ―― 止まった図は広めに取るのが通例。
+ */
+export const DEFAULT_NATAL_ORB = 5;
+
 /** 天体 ID → 名前。知らない ID はそのまま番号で返す */
 export function planetName(id: number): string {
   return PLANETS.find((planet) => planet.id === id)?.name ?? `天体${id}`;
@@ -263,6 +269,40 @@ export function crossAspects(
   return results;
 }
 
+/** 1 枚の図の中のアスペクト（どちらが動く側でもない＝ a / b は対等） */
+export interface NatalAspect {
+  /** 点列で先に出てくる側 */
+  a: string;
+  /** 後に出てくる側 */
+  b: string;
+  aspect: AspectHit;
+}
+
+/**
+ * 1 セットの中のアスペクト（出生図の中のアスペクト）。
+ *
+ * クロスと違って相手が同じ点列なので **i < j の組だけ**を見る
+ * ―― 自分同士（必ず 0°）と、裏返しの重複を出さないため。
+ * applying を付けないのは、ネイタルが止まった図だから ―― 誰も動いていない図に接近も離反もない。
+ */
+export function natalAspects(
+  points: readonly AspectPoint[],
+  orb: number = DEFAULT_NATAL_ORB,
+): NatalAspect[] {
+  const results: NatalAspect[] = [];
+  for (let i = 0; i < points.length; i++) {
+    for (let j = i + 1; j < points.length; j++) {
+      const a = points[i] as AspectPoint;
+      const b = points[j] as AspectPoint;
+      const aspect = getAspect(a.lon, b.lon, orb);
+      if (!aspect) continue;
+      results.push({ a: a.name, b: b.name, aspect });
+    }
+  }
+  results.sort((x, y) => x.aspect.orb - y.aspect.orb);
+  return results;
+}
+
 // ---------------------------------------------------------------------------
 // 天文計算（SwissEPH インスタンスを受け取る）
 // ---------------------------------------------------------------------------
@@ -402,6 +442,11 @@ export function formatCuspLine(cusps: readonly number[]): string {
   }).join(" / ");
 }
 
+/** オーブの度数表記（「0.50°」）。クロスもネイタル内も同じ流儀で書く */
+function orbText(orb: number): string {
+  return `${(Math.round(orb * 100) / 100).toFixed(2)}°`;
+}
+
 /**
  * 「T.太陽 △ N.月 (0.3°) 接近」
  *
@@ -409,8 +454,17 @@ export function formatCuspLine(cusps: readonly number[]): string {
  * 二次進行は "P." を渡す（進行天体を "T." と書くと読み違えのもとなので）。
  */
 export function formatCrossAspect(hit: CrossAspect, prefix = "T."): string {
-  const orb = (Math.round(hit.aspect.orb * 100) / 100).toFixed(2);
-  return `${prefix}${hit.transit} ${hit.aspect.symbol} N.${hit.natal}（${hit.aspect.name} / オーブ ${orb}° / ${
-    hit.applying ? "接近" : "離反"
-  }）`;
+  return `${prefix}${hit.transit} ${hit.aspect.symbol} N.${hit.natal}（${hit.aspect.name} / オーブ ${orbText(
+    hit.aspect.orb,
+  )} / ${hit.applying ? "接近" : "離反"}）`;
+}
+
+/**
+ * 「太陽 □ 月（スクエア / オーブ 2.21°）」
+ *
+ * ネイタル内アスペクトの 1 行。クロスと違って T. / N. の札も接近・離反も付かない
+ * ―― 同じ図の中の 2 点なので、どちらが動く側でもない。
+ */
+export function formatNatalAspect(hit: NatalAspect): string {
+  return `${hit.a} ${hit.aspect.symbol} ${hit.b}（${hit.aspect.name} / オーブ ${orbText(hit.aspect.orb)}）`;
 }
