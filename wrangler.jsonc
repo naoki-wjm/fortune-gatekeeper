@@ -12,6 +12,12 @@
   "observability": {
     "enabled": true
   },
+  // CPU の上限（ms）。2026-08-21 に Workers Paid へ移行（Free の名目 10ms では yearly_overview の
+  // 実測 15〜42ms が収まらない）。Paid の既定値と同じ 30 秒をここに明示しておく ―― 期間走査系の
+  // ツール（年間概要・今後の transit_events）は秒単位の予算で設計してよい、という宣言でもある。
+  "limits": {
+    "cpu_ms": 30000
+  },
   // 占星術層の台帳。key:<鍵> → {user,name,role} と chart:<user>:<chart_id> → 計算済みチャート。
   // ⚠ デプロイ前に `npx wrangler kv namespace create ASTRO_KV` で作成し、
   //    出力された id をここに差し替えること。ローカル dev はこの id を使わない

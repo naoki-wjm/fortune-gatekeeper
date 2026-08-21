@@ -11,7 +11,8 @@
  *    刻み幅は 15 年分（2016〜2030）を本物と突き合わせて天体別に決めた ―― 補間誤差は ≲1e-3°
  *    （Moshier 暦自身の精度と同じ桁）で、紙一重の日に日付が 1 日ずれるのが 15 年で数回。
  *    合計の天体計算は 355 回。同じ日付に当たる天体をまとめて呼ぶ（BASE_STEP の注記）ことで
- *    手元の Node 実測 ≒7〜8ms（Ryzen 9 8945HS）。Workers の実機では `wrangler tail` の cpuTime で要確認。
+ *    手元の Node 実測 ≒7〜8ms（Ryzen 9 8945HS）、Workers 実機では 15〜42ms（2026-08-21、`wrangler tail`）。
+ *    Free の名目 10ms には収まらなかったため Workers Paid へ移行済み（wrangler.jsonc の limits.cpu_ms）。
  *    刻みを変えるなら test/astro-yearly-real.test.ts で検算し直すこと。
  *
  * ここも解釈は持たない ―― 返すのは日付（jd）と角度だけ。文字列化と読み解きは呼び出した側の仕事。
