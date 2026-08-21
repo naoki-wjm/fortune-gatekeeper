@@ -5,6 +5,12 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     environment: "node",
+    /**
+     * sweph の複製（minify 済み・ソースマップ無し）は vite に噛ませず Node の素の loader で読む。
+     * 噛ませると「swisseph.js.map が無い」という警告が毎回出るだけで、得るものが無いため。
+     * 本物の wasm を読むのは test/astro-yearly-real.test.ts だけ。
+     */
+    server: { deps: { external: [/src[\\/]astro[\\/]sweph[\\/]/] } },
   },
   resolve: {
     /**

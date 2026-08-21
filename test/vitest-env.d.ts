@@ -9,6 +9,13 @@ declare module "node:url" {
   export function fileURLToPath(url: string | URL): string;
 }
 
+/** 本物の wasm を Node で読むテスト（test/astro-yearly-real.test.ts）が使う口だけ */
+declare module "node:fs" {
+  export function readFileSync(path: string | URL): Uint8Array;
+  const fs: { readFileSync: typeof readFileSync };
+  export default fs;
+}
+
 interface ImportMeta {
   readonly url: string;
 }

@@ -124,6 +124,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(instructions).toContain("update_default_location");
     expect(instructions).toContain("lunar_return");
     expect(instructions).toContain("solar_return");
+    expect(instructions).toContain("yearly_overview");
     // 二次進行は「原本を預けた本人だけ」と断ってある
     expect(instructions).toContain("progressions");
     expect(instructions).toContain("原本を預けた本人");
@@ -143,7 +144,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("8 本のツールを返す", async () => {
+  it("9 本のツールを返す", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -155,6 +156,7 @@ describe("占星術層の initialize / tools/list", () => {
       "solar_return",
       "progressions",
       "update_default_location",
+      "yearly_overview",
     ]);
   });
 
@@ -220,6 +222,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
       "solar_return",
       "progressions",
       "update_default_location",
+      "yearly_overview",
     ]);
   });
 
@@ -1091,6 +1094,122 @@ describe("progressions", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 年間概要
+// ---------------------------------------------------------------------------
+
+describe("yearly_overview", () => {
+  /**
+   * 偽エンジンの天体は jd に依らず同じ位置に居る＝逆行もイングレスも起きない。
+   * さらに save_chart のあとに offset を 15° 動かしておくと、ネイタル（30° 刻み）と
+   * トランジット（＋15°）の離角がすべて 15° の奇数倍になり、メジャーアスペクトも一つも立たない。
+   * ＝ **イベントが 1 件も無い年**を作れるので、器のほうだけを確かめられる。
+   */
+  async function saveFlatChart(): Promise<string> {
+    const chartId = await saveChartWithHome();
+    engine.offset = 15;
+    return chartId;
+  }
+
+  it("year を指定するとその年のソーラーリターンから 1 年", async () => {
+    const chartId = await saveFlatChart();
+    engine.sunAnchorJd = jdOf(2027, 6, 16, 6);
+
+    const result = await call("yearly_overview", {
+      chart_id: chartId,
+      year: 2027,
+      utc_offset: 9,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("年間概要（ソーラーリターン年）");
+    expect(text).toContain(`チャート: サンプル（${chartId}） / ハウス方式: プラシーダス（P）`);
+    expect(text).toContain("ネイタルの太陽: 牡羊座 0°00′");
+    expect(text).toContain("期間: 2027-06-16 06:00 UTC / ローカル 2027-06-16 15:00（UTC+9）");
+    expect(text).toContain("（365 日）");
+    expect(text).toContain("対象: 2027年のソーラーリターンから 1 年");
+    expect(text).toContain("日付は UTC+9 の暦 で 1 日刻み");
+    expect(text).toContain("start は入った最初の日、end は外れた最初の日");
+    expect(text).toContain("（t.＝トランジット / n.＝ネイタル）");
+
+    // 4 節。イベントが無いので逆行は 8 天体すべて「なし」、他の節は「なし」1 行
+    expect(text).toContain("■ 逆行期間");
+    expect(text).toContain("水星: なし");
+    expect(text).toContain("冥王星: なし");
+    expect(text).toContain("■ 星座イングレス（木星〜冥王星）");
+    expect(text).toContain("■ ASC / MC へのトランジット");
+    expect(text).toContain("■ ネイタル天体へのトランジット");
+
+    // 太陽で 2 回 ―― その年の 1 月 1 日（時差込み）から 1 回、その翌日から次の 1 回
+    expect(engine.crossCalls).toHaveLength(2);
+    expect(engine.crossCalls.every((crossCall) => crossCall.kind === "sun")).toBe(true);
+    expect(engine.crossCalls[0]?.startJd).toBeCloseTo(jdOf(2027, 1, 1) - 9 / 24, 6);
+    expect(engine.crossCalls[1]?.startJd).toBeCloseTo(jdOf(2027, 6, 16, 6) + 1, 6);
+
+    const structured = result.structuredContent;
+    expect(structured.kind).toBe("yearly_overview");
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.label).toBe("サンプル");
+    expect(structured.house_system).toBe("P");
+    expect(structured.utc_offset).toBe(9);
+    expect(structured.orb).toBe(1);
+    expect(structured.resolution).toBe("day");
+    expect(structured.period).toEqual({
+      solar_return_year: 2027,
+      start_utc: "2027-06-16T06:00:00.000Z",
+      end_utc: expect.stringMatching(/^2028-06-15T/),
+      start_jd: jdOf(2027, 6, 16, 6),
+      end_jd: jdOf(2027, 6, 16, 6) + 365.24,
+      start_date: "2027-06-16",
+      end_date: "2028-06-15",
+      days: 365,
+      is_current: false,
+    });
+    expect(structured.retrogrades).toEqual([]);
+    expect(structured.ingresses).toEqual([]);
+    expect(structured.angle_aspects).toEqual([]);
+    expect(structured.natal_aspects).toEqual([]);
+    // 疎サンプル＝総当たり（2,928 回）の 1 割強
+    expect(structured.diagnostics.ephemeris_calls).toBe(355);
+  });
+
+  it("year を省略すると現在を含むソーラーリターン年", async () => {
+    const chartId = await saveFlatChart();
+    engine.sunAnchorJd = jdOf(2026, 3, 10);
+
+    const result = await call("yearly_overview", { chart_id: chartId });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("対象: 現在（2026-08-20 02:15 UTC）を含むソーラーリターン年");
+    expect(text).toContain("日付は UTC の暦 で 1 日刻み");
+
+    // 1 年前（366 日前）から探すと、必ず現在以前のリターンに落ちる
+    expect(engine.crossCalls[0]?.startJd).toBeCloseTo(jdOf(2026, 8, 20) + 2.25 / 24 - 366, 6);
+    const structured = result.structuredContent;
+    expect(structured.period.is_current).toBe(true);
+    expect(structured.period.start_date).toBe("2026-03-10");
+    expect(structured.period.solar_return_year).toBe(2026);
+    expect(structured.utc_offset).toBe(0);
+  });
+
+  it("知らない chart_id は isError", async () => {
+    const result = await call("yearly_overview", { chart_id: "zzzz9999" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("見つかりませんでした");
+  });
+
+  it("ソーラーリターン年としてありえない長さなら計算せずに断る", async () => {
+    const chartId = await saveFlatChart();
+    engine.sunPeriod = 200; // リターンの間隔が 200 日＝そもそも太陽の周期ではない
+
+    const result = await call("yearly_overview", { chart_id: chartId, year: 2027 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("300〜400日");
+  });
+});
+
 describe("知らないツール", () => {
   it("isError で返す", async () => {
     const result = await call("reverse_horoscope", {});
@@ -1487,6 +1606,38 @@ const FROZEN_ASTRO_TOOLS = [
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "yearly_overview",
+    "title": "年間概要（ソーラーリターン年の天体イベント）",
+    "description": "登録済みチャートの**ソーラーリターンから次のソーラーリターンまでの 1 年**を 1 日刻みで走査し、その年に起きる天体イベントを一覧にする。返るのは (1) 水星〜冥王星の逆行期間、(2) 木星〜冥王星の星座イングレス（逆行で前の星座へ戻るものも含む）、(3) 木星〜冥王星がネイタルの ASC / MC に作るメジャーアスペクトの期間、(4) 同じくネイタルの 10 天体（ノードを除く）に作るメジャーアスペクトの期間（メジャー5種・オーブ 1°、各期間には最接近の日も添える）。\nyear を指定するとその年のソーラーリターンから始まる 1 年。省略すると**現在を含むソーラーリターン年**（直近のソーラーリターンから次のソーラーリターンまで）。\n日付の解像度は 1 日。start はその状態に入った最初の日、end は外れた最初の日（Web 版 Astro Tool の年間概要と同じ数え方）。utc_offset を渡すとその土地の暦で日付を出す。\n速い天体（太陽・月・水星・金星・火星）のトランジットや時刻単位の精度が要るときは transit を使うこと。このツールは解釈をしない——出た期間と角度をどう読むかは呼び出した側の仕事。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "year": {
+          "type": "integer",
+          "description": "ソーラーリターンの年（その年の 1 月 1 日以降に来るリターンから 1 年。省略すると現在を含むソーラーリターン年）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "日付に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
       "openWorldHint": false
     }
   }

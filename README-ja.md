@@ -118,7 +118,7 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 
 カード層と違って、こちらは誰の chart_id かを分ける必要があるので、URL の末尾に鍵を載せます。`POST /mcp/<鍵>` の鍵を KV の台帳（`key:<鍵>` → `{user, name, role}`）と突き合わせ、載っていなければ 401。**鍵そのものはレスポンスにもログにも出しません**（照合に失敗しても「確認できませんでした」としか言いません）。役どころは `owner` と `friend` の2つで、違いは `progressions` を使えるかどうかだけです。
 
-### ツール（8本）
+### ツール（9本）
 
 | ツール | 中身 |
 |---|---|
@@ -130,12 +130,15 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 | `lunar_return` | ネイタルの月に空の月が戻る瞬間（約27.3日に1回）とその図。`year`/`month` を指定するとその月のぶんを**すべて**（2回入る月もある）、省略すると次の1回 |
 | `solar_return` | ネイタルの太陽に空の太陽が戻る瞬間（年に1回）とその図。`year` 省略で次の1回 |
 | `progressions` | 二次進行（一日一年法）。進行天体・進行 ASC/MC・ネイタルへのアスペクト。**原本を預けた本人専用** |
+| `yearly_overview` | ソーラーリターンから次のソーラーリターンまでの1年を1日刻みで走査。水星〜冥王星の逆行期間・木星〜冥王星の星座イングレス・外惑星がネイタルの天体／ASC／MC に作るアスペクトの期間と最接近日。`year` 省略で現在を含むリターン年 |
 
 アスペクトはメジャー5種（合・セクスタイル・スクエア・トライン・オポジション）・オーブ 1°。ハウス方式は P（プラシーダス）/ K（コッホ）/ W（ホールサイン）/ E（イコール）。天体は太陽から冥王星までの10個＋ノース ノード（真）の11個です。
 
 リターンの瞬間は総当たりで探さず、Swiss Ephemeris の `swe_mooncross_ut` / `swe_solcross_ut` で一発で出します。⚠ ただし wrapper（`src/astro/sweph/sweph-wasm.js`・無改造コピー）のこの2メソッドはエラーチェックが壊れていて（返り値ではなく flags 引数を見ている）失敗しても throw しません。そこで `src/astro/returns.ts` の `crossUt` が「返ってきた jd が探索開始より後か」を必ず検算しています。
 
 進行 ASC / MC はソーラーアークで動かした MC から ARMC を出し、`swe_houses_armc` で立てます（`astro-viewer` の `viewer/calc.js` の作法をそのまま移植）。
+
+年間概要（`yearly_overview`）だけは1年ぶんを1日ずつ見る作りなので、素直に総当たりすると天体計算が約2,900回＝Workers の CPU 上限（10ms）を大きく超えます。そこで**日次の状態機械はそのままに、天体位置の供給源だけ**を差し替えました ―― 天体ごとに4〜16日おきの疎なサンプルを取り、3次ラグランジュ補間で日次表を組み立てます（速度は補間の導関数から出すので `SEFLG_SPEED` を付けずに済み、1回あたりの計算も軽くなります）。刻み幅は15年分（2016〜2030）を本物と突き合わせて天体別に決めたもので、補間誤差は 1e-3° 未満（Moshier 暦自身の精度と同じ桁）。天体計算は約355回で、同じ日付に当たる天体をまとめて呼ぶ（Swiss Ephemeris が地球の位置を使い回すので2天体目以降が半額になる）ため、刻み幅はすべて4日の倍数にそろえてあります。総当たり版との突き合わせは `test/astro-yearly-real.test.ts` が**本物の wasm を読んで**毎回検算しています。
 
 ### 立ち上げ（KV・Secret・鍵の発行）
 
@@ -195,9 +198,10 @@ fortune-gatekeeper/
   meanings/*.json       … 解説（explanation）の素材。空・エニグマの2枚
   scripts/extract_fortune.py … dic_fortune.txt → meanings/*.json の変換（Python）
   scripts/sync-decks.mjs … デッキ同期＋解説の合成＋意味テキストの剥がし
-  src/astro/astro-mcp.ts … 占星術層の MCP ハンドラ（鍵つき入口・ツール7本）
+  src/astro/astro-mcp.ts … 占星術層の MCP ハンドラ（鍵つき入口・ツール9本）
   src/astro/chart.ts    … 天体計算とテキスト整形（純関数寄り。エンジンは引数で受け取る）
   src/astro/returns.ts  … リターン（月・太陽）の一発計算と二次進行
+  src/astro/yearly.ts   … 年間概要の走査（疎サンプル＋3次補間の日次表・純関数）
   src/astro/store.ts    … KV の台帳（鍵とチャート）
   src/astro/engine.ts   … Swiss Ephemeris の wasm を読む唯一の窓口
   src/astro/sweph/*     … sweph-wasm 一式（astro-viewer からの無改造コピー。手を入れない）
