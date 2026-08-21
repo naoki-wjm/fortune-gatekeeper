@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
+import { normalizeDegree } from "../src/astro/chart";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
 import type { AuthContext } from "../src/astro/store";
 import { FakeKv } from "./stubs/fake-kv";
@@ -125,6 +126,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(instructions).toContain("lunar_return");
     expect(instructions).toContain("solar_return");
     expect(instructions).toContain("yearly_overview");
+    expect(instructions).toContain("transit_events");
     // 二次進行は「原本を預けた本人だけ」と断ってある
     expect(instructions).toContain("progressions");
     expect(instructions).toContain("原本を預けた本人");
@@ -144,7 +146,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("9 本のツールを返す", async () => {
+  it("10 本のツールを返す", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -157,6 +159,7 @@ describe("占星術層の initialize / tools/list", () => {
       "progressions",
       "update_default_location",
       "yearly_overview",
+      "transit_events",
     ]);
   });
 
@@ -223,6 +226,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
       "progressions",
       "update_default_location",
       "yearly_overview",
+      "transit_events",
     ]);
   });
 
@@ -1210,6 +1214,196 @@ describe("yearly_overview", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 期間内のトランジットイベント（時刻つき）
+// ---------------------------------------------------------------------------
+
+describe("transit_events", () => {
+  /**
+   * 「止まった空」を作る。
+   *
+   * 偽エンジンの天体は jd に依らず同じ位置に居るが、速度は 1（金星だけ −0.5）を返す作りなので、
+   * そのままだと「位置は動かないのに速度がある」という物理的にありえない標本になり、
+   * エルミート補間が区間の中で暴れる（ありもしない留が並ぶ）。ここでは速度も 0 にそろえておく。
+   * さらに天体を 15° ずらせば、ネイタル（30° 刻み）との離角がすべて 15° の奇数倍になり
+   * メジャーアスペクトも一つも立たない ＝ **イベントが 1 件も無い期間**で器だけを確かめられる。
+   */
+  function freezeSky(): void {
+    engine.swe_calc_ut = (_jd: number, planetId: number, _flags: number): number[] =>
+      planetId === -1 ? [23.44, 23.44, 0, 0, 0, 0] : [planetId * 30 + 15, 0, 1, 0, 0, 0];
+  }
+
+  /** 月だけ 100° から 13°/日 で走らせる（ほかは 15° ずらして止めたまま） */
+  function moveTheMoon(startJd: number): void {
+    engine.swe_calc_ut = (jd: number, planetId: number, _flags: number): number[] => {
+      if (planetId === 1) return [normalizeDegree(100 + 13 * (jd - startJd)), 0, 1, 13, 0, 0];
+      if (planetId === -1) return [23.44, 23.44, 0, 0, 0, 0];
+      return [planetId * 30 + 15, 0, 1, 0, 0, 0];
+    };
+  }
+
+  it("start と days を指定すると、その日の 0 時から（utc_offset の暦で）", async () => {
+    const chartId = await saveChartWithHome();
+    freezeSky();
+
+    const result = await call("transit_events", {
+      chart_id: chartId,
+      start: "2026-08-20",
+      days: 3,
+      utc_offset: 9,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("トランジットイベント（時刻つき）");
+    expect(text).toContain(`チャート: サンプル（${chartId}） / ハウス方式: プラシーダス（P）`);
+    expect(text).toContain("期間: 2026-08-20 00:00（UTC+9） 〜 2026-08-23 00:00（UTC+9）");
+    expect(text).toContain("（3 日、UTC では 2026-08-19 15:00 〜 2026-08-22 15:00）");
+    expect(text).toContain("動く側: 太陽〜冥王星（10 天体）、相手: ネイタル 10 天体（ノード除く）と ASC / MC");
+    expect(text).toContain("メジャー5種・オーブ 1.0°");
+    expect(text).toContain("時刻は UTC+9、分単位（細かさ 10 分刻み＋二分法）");
+    // 止まった空なのでイベントは 1 件も無い
+    expect(text).toContain("■ 期間内のイベント（時系列。t.＝トランジット / n.＝ネイタル）");
+    expect(text).toContain("なし");
+    expect(text).toContain("■ 件数 アスペクト窓 0 / exact 0 / 留 0 / イングレス 0");
+
+    const structured = result.structuredContent;
+    expect(structured.kind).toBe("transit_events");
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.label).toBe("サンプル");
+    expect(structured.house_system).toBe("P");
+    expect(structured.bodies).toBe("all");
+    expect(structured.utc_offset).toBe(9);
+    expect(structured.orb).toBe(1);
+    expect(structured.tick_minutes).toBe(10);
+    expect(structured.period).toEqual({
+      start_utc: "2026-08-19T15:00:00.000Z",
+      end_utc: "2026-08-22T15:00:00.000Z",
+      start_local: "2026-08-20 00:00",
+      end_local: "2026-08-23 00:00",
+      days: 3,
+    });
+    expect(structured.windows).toEqual([]);
+    expect(structured.stations).toEqual([]);
+    expect(structured.ingresses).toEqual([]);
+    expect(structured.counts).toEqual({ windows: 0, exacts: 0, stations: 0, ingresses: 0 });
+    // 5 天体が 1 日おき（4 点）＋ 5 天体が 4 日おき（2 点）＝ 30 回
+    expect(structured.diagnostics.ephemeris_calls).toBe(30);
+  });
+
+  it("start を省略すると utc_offset の暦での今日から 7 日", async () => {
+    const chartId = await saveChartWithHome();
+    freezeSky();
+
+    const result = await call("transit_events", { chart_id: chartId, utc_offset: 9 });
+    expect(result.isError).toBeUndefined();
+
+    // 現在は 2026-08-20 02:15 UTC ＝ 日本時間では同日 11:15。その日の 0 時から
+    const text: string = result.content[0].text;
+    expect(text).toContain("期間: 2026-08-20 00:00（UTC+9） 〜 2026-08-27 00:00（UTC+9）");
+    expect(text).toContain("（7 日、");
+    expect(result.structuredContent.period.start_utc).toBe("2026-08-19T15:00:00.000Z");
+    expect(result.structuredContent.period.days).toBe(7);
+  });
+
+  it("動く天体があれば時刻つきで時系列に並ぶ", async () => {
+    const chartId = await saveChartWithHome();
+    // 2026-08-20 00:00（UTC+9）＝ 2026-08-19 15:00 UTC
+    moveTheMoon(jdOf(2026, 8, 19, 15));
+
+    const result = await call("transit_events", {
+      chart_id: chartId,
+      start: "2026-08-20",
+      days: 3,
+      utc_offset: 9,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    // 月は 119°（08-21 11:04）で入り、120°（12:55）でネイタル太陽とトライン、121°（14:46）で外れる
+    expect(text).toContain("08-21 11:04〜14:46  t.月 △ n.太陽(10H)  exact 12:55");
+    // 同じ 120° で獅子座入り
+    expect(text).toContain("08-21 12:55  t.月 獅子座入り");
+
+    const structured = result.structuredContent;
+    const trine = structured.windows.find(
+      (window: { transit: string; target: { name: string }; aspect: { angle: number } }) =>
+        window.transit === "月" && window.target.name === "太陽" && window.aspect.angle === 120,
+    );
+    expect(trine.target).toEqual({ kind: "planet", name: "太陽", id: 0, house: 10 });
+    expect(trine.aspect).toEqual({ angle: 120, name: "トライン", symbol: "△" });
+    expect(trine.entering).toMatch(/^2026-08-21T02:04:/);
+    expect(trine.leaving).toMatch(/^2026-08-21T05:46:/);
+    expect(trine.exact).toHaveLength(1);
+    expect(trine.exact[0]).toMatch(/^2026-08-21T03:55:/);
+    expect(trine.min_orb).toBe(0);
+    expect(trine.applying_at_start).toBe(true);
+    expect(trine.clipped).toBeUndefined();
+    expect(structured.counts.windows).toBeGreaterThan(0);
+    expect(structured.ingresses[0]).toMatchObject({
+      transit: "月",
+      id: 1,
+      sign: "獅子座",
+      sign_index: 4,
+      retrograde: false,
+    });
+  });
+
+  it("期間の上限は bodies による（超えたら逃げ道を案内する）", async () => {
+    const chartId = await saveChartWithHome();
+    freezeSky();
+
+    const tooLong = await call("transit_events", {
+      chart_id: chartId,
+      start: "2026-08-20",
+      days: 40,
+      bodies: "all",
+    });
+    expect(tooLong.isError).toBe(true);
+    expect(tooLong.content[0].text).toContain("no_moon");
+    expect(tooLong.content[0].text).toContain("outer");
+    expect(tooLong.content[0].text).toContain("yearly_overview");
+
+    const noMoon = await call("transit_events", {
+      chart_id: chartId,
+      start: "2026-08-20",
+      days: 40,
+      bodies: "no_moon",
+    });
+    expect(noMoon.isError).toBeUndefined();
+    expect(noMoon.structuredContent.bodies).toBe("no_moon");
+    expect(noMoon.content[0].text).toContain("動く側: 月を除く 9 天体");
+
+    const wayTooLong = await call("transit_events", {
+      chart_id: chartId,
+      start: "2026-08-20",
+      days: 400,
+      bodies: "outer",
+    });
+    expect(wayTooLong.isError).toBe(true);
+  });
+
+  it("start の書式・bodies の値・知らない chart_id は isError", async () => {
+    const chartId = await saveChartWithHome();
+    freezeSky();
+
+    const slashes = await call("transit_events", { chart_id: chartId, start: "2026/08/20" });
+    expect(slashes.isError).toBe(true);
+    expect(slashes.content[0].text).toContain("YYYY-MM-DD");
+
+    const noSuchMonth = await call("transit_events", { chart_id: chartId, start: "2026-13-01" });
+    expect(noSuchMonth.isError).toBe(true);
+
+    const badBodies = await call("transit_events", { chart_id: chartId, bodies: "moon" });
+    expect(badBodies.isError).toBe(true);
+    expect(badBodies.content[0].text).toContain("bodies は");
+
+    const unknown = await call("transit_events", { chart_id: "zzzz9999" });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain("見つかりませんでした");
+  });
+});
+
 describe("知らないツール", () => {
   it("isError で返す", async () => {
     const result = await call("reverse_horoscope", {});
@@ -1629,6 +1823,55 @@ const FROZEN_ASTRO_TOOLS = [
           "minimum": -14,
           "maximum": 14,
           "description": "日付に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "transit_events",
+    "title": "期間内のトランジットイベント（時刻つき）",
+    "description": "登録済みチャートに対して、指定した期間（既定は今日から 7 日間）に起きるトランジットのイベントを**時刻つき（分単位）**で時系列に並べる。返るのは (1) トランジット天体がネイタルの 10 天体（ノード除く）と ASC / MC に作るメジャーアスペクト（合・セクスタイル・スクエア・トライン・オポジション、オーブ 1°）の**入った時刻（entering）・ぴったりの時刻（exact）・外れた時刻（leaving）**と最小オーブ、(2) 留（逆行の始まり・終わり）の時刻、(3) 星座イングレスの時刻。\nbodies で動く側の天体を選ぶ: all＝太陽〜冥王星の 10 天体（最長 31 日）／no_moon＝月を除く（最長 93 日）／outer＝木星〜冥王星（最長 366 日）。月は 1 か月に 60 本ほどアスペクトを作るので、長い期間は no_moon か outer で。\nstart は \"YYYY-MM-DD\"（utc_offset の暦でその日の 0 時から）。省略すると utc_offset の暦での今日。\n1 年を日単位で俯瞰するなら yearly_overview、ある一瞬の配置を見るなら transit。このツールは解釈をしない——出た時刻と角度をどう読むかは呼び出した側の仕事。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "start": {
+          "type": "string",
+          "pattern": "^-?\\d{1,5}-\\d{2}-\\d{2}$",
+          "description": "開始日 \"YYYY-MM-DD\"（utc_offset の暦。省略すると今日）"
+        },
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 366,
+          "description": "日数（省略すると 7。上限は bodies による: all 31 / no_moon 93 / outer 366）"
+        },
+        "bodies": {
+          "type": "string",
+          "enum": [
+            "all",
+            "no_moon",
+            "outer"
+          ],
+          "default": "all",
+          "description": "動く側の天体の組"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "暦と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC）"
         }
       },
       "required": [

@@ -45,6 +45,15 @@ import {
   type SwissEph,
 } from "./chart";
 import {
+  BODY_SET_LABEL,
+  MAX_DAYS,
+  TICK_MINUTES,
+  assertDaysInRange,
+  formatEventsText,
+  scanTransitEvents,
+  type BodySet,
+} from "./events";
+import {
   computeProgression,
   crossUt,
   crossingsInRange,
@@ -87,7 +96,10 @@ const ASTRO_INSTRUCTIONS =
   "progressions=二次進行（一日一年法） / " +
   "yearly_overview=ソーラーリターンから次のソーラーリターンまでの 1 年の逆行期間・イングレス・" +
   "ネイタルへの外惑星トランジットの一覧（1 日刻み。" +
-  "「今日だけの配置か、数週間続く背景か、次に動くのはいつか」を見るならこれ）。" +
+  "「今日だけの配置か、数週間続く背景か、次に動くのはいつか」を見るならこれ） / " +
+  "transit_events=期間内（既定は今日から 7 日）のアスペクトの entering・exact・leaving、留、" +
+  "イングレスを分単位の時刻つきで時系列に" +
+  "（「今週 exact になるのは」「明日いちばんタイトな時間帯は」はこれ）。" +
   "progressions だけは出生の原本が要るため、原本を預けた本人の URL でしか動きません。";
 
 // ---------------------------------------------------------------------------
@@ -493,6 +505,53 @@ export const ASTRO_TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "transit_events",
+    title: "期間内のトランジットイベント（時刻つき）",
+    description:
+      "登録済みチャートに対して、指定した期間（既定は今日から 7 日間）に起きるトランジットのイベントを" +
+      "**時刻つき（分単位）**で時系列に並べる。返るのは (1) トランジット天体がネイタルの 10 天体（ノード除く）と " +
+      "ASC / MC に作るメジャーアスペクト（合・セクスタイル・スクエア・トライン・オポジション、オーブ 1°）の" +
+      "**入った時刻（entering）・ぴったりの時刻（exact）・外れた時刻（leaving）**と最小オーブ、" +
+      "(2) 留（逆行の始まり・終わり）の時刻、(3) 星座イングレスの時刻。\n" +
+      "bodies で動く側の天体を選ぶ: all＝太陽〜冥王星の 10 天体（最長 31 日）／no_moon＝月を除く（最長 93 日）／" +
+      "outer＝木星〜冥王星（最長 366 日）。月は 1 か月に 60 本ほどアスペクトを作るので、長い期間は no_moon か outer で。\n" +
+      'start は "YYYY-MM-DD"（utc_offset の暦でその日の 0 時から）。省略すると utc_offset の暦での今日。\n' +
+      "1 年を日単位で俯瞰するなら yearly_overview、ある一瞬の配置を見るなら transit。" +
+      "このツールは解釈をしない——出た時刻と角度をどう読むかは呼び出した側の仕事。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chart_id: { type: "string", description: "対象のチャート ID（list_charts で確認できる）" },
+        start: {
+          type: "string",
+          pattern: "^-?\\d{1,5}-\\d{2}-\\d{2}$",
+          description: '開始日 "YYYY-MM-DD"（utc_offset の暦。省略すると今日）',
+        },
+        days: {
+          type: "integer",
+          minimum: 1,
+          maximum: 366,
+          description: "日数（省略すると 7。上限は bodies による: all 31 / no_moon 93 / outer 366）",
+        },
+        bodies: {
+          type: "string",
+          enum: ["all", "no_moon", "outer"],
+          default: "all",
+          description: "動く側の天体の組",
+        },
+        utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          description: "暦と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC）",
+        },
+      },
+      required: ["chart_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -587,6 +646,20 @@ function requireString(args: Record<string, unknown>, key: string, maxLength: nu
   return value;
 }
 
+const BODY_SETS: readonly BodySet[] = ["all", "no_moon", "outer"];
+
+/** transit_events の bodies（動く側の天体の組）。既定は all */
+function requireBodySet(args: Record<string, unknown>): BodySet {
+  const value = optionalString(args, "bodies", 12) ?? "all";
+  if (!BODY_SETS.includes(value as BodySet)) {
+    throw new AstroError(
+      `bodies は ${BODY_SETS.join(" / ")} のいずれかにしてください: ${value}` +
+        `（all＝太陽〜冥王星の 10 天体 / no_moon＝月を除く 9 天体 / outer＝木星〜冥王星）`,
+    );
+  }
+  return value as BodySet;
+}
+
 function requireHouseSystem(args: Record<string, unknown>): string {
   const value = optionalString(args, "house_system", 4) ?? "P";
   if (!HOUSE_SYSTEM_CODES.includes(value)) {
@@ -621,13 +694,35 @@ function formatOffsetLabel(utcOffset: number): string {
   return `UTC${sign}${label}`;
 }
 
-/** UTC の Date ＋ 時差を「2026-08-20 11:15（UTC+9）」に */
-function formatLocalMoment(utcDate: Date, utcOffset: number): string {
+/** UTC の Date ＋ 時差を「2026-08-20 11:15」に（時差の札は付けない） */
+function formatPlainMoment(utcDate: Date, utcOffset: number): string {
   const shifted = new Date(utcDate.getTime() + utcOffset * 3_600_000);
   return (
     `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ` +
-    `${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}（${formatOffsetLabel(utcOffset)}）`
+    `${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}`
   );
+}
+
+/** UTC の Date ＋ 時差を「2026-08-20 11:15（UTC+9）」に */
+function formatLocalMoment(utcDate: Date, utcOffset: number): string {
+  return `${formatPlainMoment(utcDate, utcOffset)}（${formatOffsetLabel(utcOffset)}）`;
+}
+
+/** 「YYYY-MM-DD」だけの開始日（transit_events の start）。月日の範囲もここで弾く */
+function parseStartDate(raw: string): { year: number; month: number; day: number } {
+  const matched = /^(-?\d{1,5})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!matched) {
+    throw new AstroError(
+      `start は "YYYY-MM-DD" の形で指定してください（例: 2026-08-20）: ${raw}`,
+    );
+  }
+  const year = Number(matched[1]);
+  const month = Number(matched[2]);
+  const day = Number(matched[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    throw new AstroError(`start の月日が暦の範囲を外れています（月は 1〜12、日は 1〜31）: ${raw}`);
+  }
+  return { year, month, day };
 }
 
 /** Date（UTC）→ julianDay に渡せる MomentInput（時差 0） */
@@ -655,6 +750,19 @@ function utcDateFromLocal(
   local.setUTCFullYear(year, month - 1, day);
   local.setUTCHours(hour, minute, 0, 0);
   return new Date(local.getTime() - utcOffset * 3_600_000);
+}
+
+/** その瞬間を utcOffset の暦で見た日の 0 時（UTC の Date で返す） */
+function startOfLocalDay(now: Date, utcOffset: number): Date {
+  const shifted = new Date(now.getTime() + utcOffset * 3_600_000);
+  return utcDateFromLocal(
+    shifted.getUTCFullYear(),
+    shifted.getUTCMonth() + 1,
+    shifted.getUTCDate(),
+    0,
+    0,
+    utcOffset,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,6 +1727,141 @@ async function runYearlyOverview(
   };
 }
 
+// ---------------------------------------------------------------------------
+// 期間内のトランジットイベント（時刻つき）
+// ---------------------------------------------------------------------------
+
+/**
+ * 数日〜1 か月ぶんのトランジットを**分単位の時刻つき**で並べる。
+ *
+ * 走査そのものは events.ts の純関数（疎サンプル＋3 次エルミート補間＋10 分刻み＋二分法）。
+ * ここがやるのは「どの期間か」を決めることと、jd を**表示時差の時計**に直すことだけ。
+ * 年間概要（1 日刻み）の隣に置く道具で、一点を見る顕微鏡は transit のまま。
+ */
+async function runTransitEvents(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const chartId = requireString(args, "chart_id", 32);
+
+  const chart = await getChart(context.kv, context.auth.user, chartId);
+  if (!chart) {
+    return toolError(
+      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
+        "save_chart で登録してください。",
+    );
+  }
+
+  const start = optionalString(args, "start", 12);
+  const days = optionalInteger(args, "days", 1, MAX_DAYS.outer) ?? 7;
+  const bodies = requireBodySet(args);
+  const utcOffset = optionalNumber(args, "utc_offset", -14, 14) ?? 0;
+  // 期間の上限は**天体計算より先に**弾く（走査側でも見ているが、ここで止めれば wasm にも触らない）
+  assertDaysInRange(days, bodies);
+
+  const swe = await engineOf(context);
+  const startMoment =
+    start === undefined
+      ? momentFromUtcDate(startOfLocalDay(context.now ? context.now() : new Date(), utcOffset))
+      : { ...parseStartDate(start), hour: 0, minute: 0, utcOffset };
+  const startJd = julianDay(swe, startMoment);
+
+  const scan = scanTransitEvents(swe, {
+    startJd,
+    days,
+    bodies,
+    natalPlanets: chart.planets,
+    cusps: chart.cusps,
+    angles: anglesOf(chart),
+  });
+
+  /** jd → 表示時差の時計で「MM-DD HH:mm」（年は見出しに出してあるので行では省く） */
+  const when = (jd: number): string => {
+    const shifted = new Date(dateFromJulianDay(jd).getTime() + utcOffset * 3_600_000);
+    return (
+      `${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ` +
+      `${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}`
+    );
+  };
+  const isoOf = (jd: number): string => dateFromJulianDay(jd).toISOString();
+
+  const startDate = dateFromJulianDay(scan.startJd);
+  const endDate = dateFromJulianDay(scan.endJd);
+  const exacts = scan.windows.reduce((total, window) => total + window.exact.length, 0);
+
+  const lines: string[] = [
+    "トランジットイベント（時刻つき）",
+    `チャート: ${chart.label}（${chartId}） / ハウス方式: ${houseSystemName(chart.house_system)}（${chart.house_system}）`,
+    `期間: ${formatLocalMoment(startDate, utcOffset)} 〜 ${formatLocalMoment(endDate, utcOffset)}` +
+      `（${days} 日、UTC では ${formatPlainMoment(startDate, 0)} 〜 ${formatPlainMoment(endDate, 0)}）`,
+    `動く側: ${BODY_SET_LABEL[bodies]}、相手: ネイタル 10 天体（ノード除く）と ASC / MC、` +
+      `メジャー5種・オーブ ${DEFAULT_ORB.toFixed(1)}°`,
+    `時刻は ${formatOffsetLabel(utcOffset)}、分単位（細かさ ${TICK_MINUTES} 分刻み＋二分法）`,
+    "",
+    ...formatEventsText(scan, when),
+  ];
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: {
+      kind: "transit_events",
+      chart_id: chartId,
+      label: chart.label,
+      house_system: chart.house_system,
+      period: {
+        start_utc: startDate.toISOString(),
+        end_utc: endDate.toISOString(),
+        start_local: formatPlainMoment(startDate, utcOffset),
+        end_local: formatPlainMoment(endDate, utcOffset),
+        days,
+      },
+      utc_offset: utcOffset,
+      bodies,
+      orb: DEFAULT_ORB,
+      tick_minutes: TICK_MINUTES,
+      windows: scan.windows.map((window) => ({
+        transit: window.transit,
+        transit_id: window.transitId,
+        target: {
+          kind: window.target.kind,
+          name: window.target.name,
+          id: window.target.id,
+          house: window.target.house,
+        },
+        aspect: window.aspect,
+        entering: window.entering === null ? null : isoOf(window.entering),
+        exact: window.exact.map(isoOf),
+        leaving: window.leaving === null ? null : isoOf(window.leaving),
+        min_orb: window.minOrb,
+        min_orb_at: isoOf(window.minOrbAt),
+        applying_at_start: window.applyingAtStart,
+        ...(window.clipped ? { clipped: window.clipped } : {}),
+      })),
+      stations: scan.stations.map((station) => ({
+        transit: station.name,
+        id: station.id,
+        at: isoOf(station.jd),
+        to: station.to,
+        lon: station.lon,
+        position: formatDegree(station.lon),
+      })),
+      ingresses: scan.ingresses.map((ingress) => ({
+        transit: ingress.name,
+        id: ingress.id,
+        at: isoOf(ingress.jd),
+        sign: ingress.sign,
+        sign_index: ingress.signIndex,
+        retrograde: ingress.retrograde,
+      })),
+      counts: {
+        windows: scan.windows.length,
+        exacts,
+        stations: scan.stations.length,
+        ingresses: scan.ingresses.length,
+      },
+      diagnostics: { ephemeris_calls: scan.ephemerisCalls },
+    },
+  };
+}
+
 async function callAstroTool(
   name: unknown,
   rawArguments: unknown,
@@ -1636,6 +1879,7 @@ async function callAstroTool(
     if (name === "solar_return") return await runReturn("sun", rawArguments, context);
     if (name === "progressions") return await runProgressions(rawArguments, context);
     if (name === "yearly_overview") return await runYearlyOverview(rawArguments, context);
+    if (name === "transit_events") return await runTransitEvents(rawArguments, context);
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
     if (error instanceof AstroError) return toolError(error.message);
