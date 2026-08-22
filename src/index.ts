@@ -42,6 +42,7 @@ const GUIDE_TEXT = [
   "デッキ: sky（空オラクル） / enigma（エニグマオラクル） / tarot（タロット大アルカナ22枚） / " +
     "tarot_full（タロット78枚） / rune（ルーン） / lenormand（ルノルマン36枚）",
   "易の立て方: coins（擲銭法） / yarrow（本筮法） / abridged（略筮法）",
+  "納甲（断易）: cast_hexagram に nakko: true を渡すと、立卦日時の四柱と各爻の干支・世応・六親・六獣が付く",
   "アストロダイス: 天体・星座・ハウスの12面ダイス3個（1〜3組・名前と記号のみ）",
   "ジオマンシー: シールドチャート（母4・娘4・姪4・証人2・裁判官1＋参考の和解者。16図形の名前と点の並びのみ）",
   "",
@@ -88,7 +89,8 @@ export default {
 
       if (url.pathname === "/mcp") {
         if (request.method === "POST") {
-          return await handleMcpRequest(request);
+          // getEngine は納甲（cast_hexagram の nakko: true）だけが使う。占星術層と同じもの
+          return await handleMcpRequest(request, { getEngine });
         }
         return methodNotAllowed();
       }

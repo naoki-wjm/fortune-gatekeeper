@@ -23,6 +23,16 @@ import {
   rollAstroDice,
 } from "./astro-dice";
 import { castGeomancy, formatShieldChartText } from "./geomancy";
+import {
+  DEFAULT_UTC_OFFSET,
+  assertCalendarDay,
+  buildNakko,
+  formatNakkoText,
+  momentFromDate,
+  sunLongitude,
+  type NakkoMoment,
+} from "./nakko";
+import type { SwissEph } from "./astro/chart";
 
 /** serverInfo.name。占星術層（astro-mcp.ts）も同じ名前を名乗る */
 export const SERVER_NAME = "fortune-gatekeeper";
@@ -44,6 +54,7 @@ const SERVER_INSTRUCTIONS =
   DECK_POLICY_NOTE +
   "カードのほかに易占（周易）も立てられます——cast_hexagram が六爻を乱数で出し、" +
   "本卦・変爻・之卦・互卦を返します。卦辞・爻辞は載せていないので、そこもあなたの知識で読んでください。" +
+  "cast_hexagram は nakko: true で納甲（四柱と各爻の干支・世応・六親・六獣）も付けられます。" +
   "アストロダイス（roll_astro_dice）も振れます——天体 × 星座 × ハウスの名前の組だけを返すので、" +
   "意味はあなたの知識で。" +
   "ジオマンシー（cast_geomancy）も立てられます——16 図形の名前と点の並びだけを返すので、" +
@@ -241,6 +252,12 @@ const TOOLS = [
       "abridged=略筮法（筮竹で下卦・上卦・変爻を1回ずつ得る。変爻はちょうど1本）。既定は coins。\n" +
       "返るのは本卦（序卦の番号・卦名・記号・上下の八卦）、六爻（初爻から上爻へ。老陽・老陰が変爻）、" +
       "変爻の位、之卦（変爻が無ければ null）、互卦、それにコインの出目や筮竹の本数といった過程。\n" +
+      "nakko=true を渡すと納甲（断易・五行易）の表も添える——立卦日時の四柱（年月日時の干支）と、" +
+      "本卦・之卦の各爻の納甲干支、八宮と世応、六親、六獣。" +
+      "これらはすべて卦と日時からの導出で、乱数は 1 ビットも増えない。" +
+      "六親の吉凶や用神の取り方は書かないので、そこも自分の知識で読むこと。\n" +
+      "立卦日時（year / month / day / hour / minute / utc_offset）は nakko=true のときだけ使える。" +
+      "すべて省略すると現在時刻。\n" +
       "自分で「立てたふり」をせず、易を立てる場面では必ずこのツールを呼ぶこと。",
     inputSchema: {
       type: "object",
@@ -250,6 +267,54 @@ const TOOLS = [
           enum: CAST_METHOD_IDS,
           default: "coins",
           description: "立て方。coins=擲銭法（既定） / yarrow=本筮法 / abridged=略筮法",
+        },
+        nakko: {
+          type: "boolean",
+          default: false,
+          description:
+            "納甲（断易）を添えるか（既定 false）。true にすると立卦日時の四柱と、" +
+            "各爻の納甲干支・八宮と世応・六親・六獣が付く。",
+        },
+        year: {
+          type: "integer",
+          minimum: -5000,
+          maximum: 5000,
+          description:
+            "立卦日時の年（nakko=true のときだけ使える）。year / month / day は 3 つそろえて指定する。" +
+            "日時をすべて省略すると現在時刻で立てる。",
+        },
+        month: {
+          type: "integer",
+          minimum: 1,
+          maximum: 12,
+          description: "立卦日時の月（1〜12）。",
+        },
+        day: {
+          type: "integer",
+          minimum: 1,
+          maximum: 31,
+          description: "立卦日時の日。暦に存在しない日付（2026-02-31 など）は断る。",
+        },
+        hour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description: "立卦日時の時（0〜23）。省略すると 0 時（12 時ではない）。",
+        },
+        minute: {
+          type: "integer",
+          minimum: 0,
+          maximum: 59,
+          description: "立卦日時の分（0〜59）。省略すると 0 分。",
+        },
+        utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          default: DEFAULT_UTC_OFFSET,
+          description:
+            "日時をどの土地の時計で読むか（既定 9）。省略時は日本時間。" +
+            "ほかの土地の時計で立てたときはその時差を。",
         },
       },
       additionalProperties: false,
@@ -416,8 +481,51 @@ function runDrawCards(rawArguments: unknown): ToolResult {
   };
 }
 
-/** cast_hexagram の引数を検算する（型だけ見る。値の妥当性は castHexagram 側が見る） */
-function parseCastArguments(raw: unknown): CastOptions {
+/** 数値の引数（範囲つき）。未指定は undefined */
+function castNumber(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): number | undefined {
+  const value = args[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new CastError(`${key} は数値で指定してください`);
+  }
+  if (value < min || value > max) {
+    throw new CastError(`${key} は ${min} 以上 ${max} 以下で指定してください: ${value}`);
+  }
+  return value;
+}
+
+/** 整数の引数（範囲つき）。未指定は undefined */
+function castInteger(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): number | undefined {
+  const value = castNumber(args, key, min, max);
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value)) throw new CastError(`${key} は整数で指定してください: ${value}`);
+  return value;
+}
+
+/** cast_hexagram の読み取り結果（立て方と、納甲を付けるなら立卦の日時） */
+interface CastRequest {
+  options: CastOptions;
+  /** null なら納甲を付けない（＝エンジンにも触らない） */
+  nakko: NakkoMoment | null;
+}
+
+/**
+ * cast_hexagram の引数を検算する（method の値の妥当性は castHexagram 側が見る）。
+ *
+ * 日時は nakko: true のときだけ受ける ―― nakko を付けないのに日時を渡してくるのは、
+ * たいてい「納甲のつもりで旗を立て忘れた」ときなので、黙って無視せず断る。
+ */
+function parseCastArguments(raw: unknown, now: Date): CastRequest {
   const args = (raw ?? {}) as Record<string, unknown>;
   const options: CastOptions = {};
 
@@ -429,15 +537,101 @@ function parseCastArguments(raw: unknown): CastOptions {
     options.method = method;
   }
 
-  return options;
+  const nakko = args["nakko"];
+  if (nakko !== undefined && nakko !== null && typeof nakko !== "boolean") {
+    throw new CastError("nakko は true / false で指定してください");
+  }
+
+  const year = castInteger(args, "year", -5000, 5000);
+  const month = castInteger(args, "month", 1, 12);
+  const day = castInteger(args, "day", 1, 31);
+  const hour = castInteger(args, "hour", 0, 23);
+  const minute = castInteger(args, "minute", 0, 59);
+  const utcOffset = castNumber(args, "utc_offset", -14, 14);
+
+  const hasMoment =
+    year !== undefined ||
+    month !== undefined ||
+    day !== undefined ||
+    hour !== undefined ||
+    minute !== undefined ||
+    utcOffset !== undefined;
+
+  if (nakko !== true) {
+    if (hasMoment) {
+      throw new CastError(
+        "日時は nakko: true のときだけ使います" +
+          "（納甲を付けるなら nakko: true を、卦だけでよければ日時を外してください）",
+      );
+    }
+    return { options, nakko: null };
+  }
+
+  const offset = utcOffset ?? DEFAULT_UTC_OFFSET;
+  const hasDate = year !== undefined || month !== undefined || day !== undefined;
+  const hasClock = hour !== undefined || minute !== undefined;
+
+  if (!hasDate) {
+    if (hasClock) {
+      throw new CastError(
+        "日時を指定するときは year / month / day をそろえてください" +
+          "（hour・minute を省くと 0 時 0 分。日時をすべて省くと現在時刻）",
+      );
+    }
+    return { options, nakko: momentFromDate(now, offset) };
+  }
+
+  if (year === undefined || month === undefined || day === undefined) {
+    throw new CastError(
+      "日時を指定するときは year / month / day をそろえてください" +
+        "（hour・minute を省くと 0 時 0 分。日時をすべて省くと現在時刻）",
+    );
+  }
+  // 実在しない日付は、黙って翌月へ繰り上がる前に断る
+  assertCalendarDay(year, month, day);
+
+  return {
+    options,
+    nakko: { year, month, day, hour: hour ?? 0, minute: minute ?? 0, utcOffset: offset },
+  };
 }
 
-function runCastHexagram(rawArguments: unknown): ToolResult {
-  const options = parseCastArguments(rawArguments);
-  const result = castHexagram(options);
+/** 納甲の太陽黄経を出すためのエンジン。nakko を使わない限り呼ばれない */
+async function engineOf(context: CardContext): Promise<SwissEph> {
+  if (!context.getEngine) {
+    throw new CastError("この呼び出しでは天体計算エンジンが使えないため納甲を出せません");
+  }
+  try {
+    return await context.getEngine();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new CastError(`納甲の月支を出す天体計算エンジンを初期化できませんでした: ${detail}`);
+  }
+}
+
+async function runCastHexagram(
+  rawArguments: unknown,
+  context: CardContext,
+): Promise<ToolResult> {
+  const now = context.now ? context.now() : new Date();
+  const request = parseCastArguments(rawArguments, now);
+  const result = castHexagram(request.options);
+
+  if (!request.nakko) {
+    // 納甲を付けないときの返り値は従来どおり（1 バイトも変えない）
+    return {
+      content: [{ type: "text", text: formatCastResult(result) }],
+      structuredContent: result,
+    };
+  }
+
+  const swe = await engineOf(context);
+  const nakko = buildNakko(result, request.nakko, sunLongitude(swe, request.nakko));
   return {
-    content: [{ type: "text", text: formatCastResult(result) }],
-    structuredContent: result,
+    content: [
+      { type: "text", text: `${formatCastResult(result)}\n\n${formatNakkoText(result, nakko)}` },
+    ],
+    structuredContent: { ...result, nakko },
   };
 }
 
@@ -484,12 +678,16 @@ function assertKnownArguments(name: unknown, rawArguments: unknown): void {
   if (message !== null) throw new ArgumentError(message);
 }
 
-function callTool(name: unknown, rawArguments: unknown): ToolResult {
+async function callTool(
+  name: unknown,
+  rawArguments: unknown,
+  context: CardContext,
+): Promise<ToolResult> {
   try {
     assertKnownArguments(name, rawArguments);
     if (name === "list_decks") return runListDecks();
     if (name === "draw_cards") return runDrawCards(rawArguments);
-    if (name === "cast_hexagram") return runCastHexagram(rawArguments);
+    if (name === "cast_hexagram") return await runCastHexagram(rawArguments, context);
     if (name === "roll_astro_dice") return runRollAstroDice(rawArguments);
     if (name === "cast_geomancy") return runCastGeomancy();
     return toolError(`知らないツールです: ${String(name)}`);
@@ -622,8 +820,25 @@ export async function readJsonRpcRequest(
   return { ok: true, value: { id: rawId, method, params: message.params } };
 }
 
+/**
+ * カード層に外から差し込むもの。
+ *
+ * カード占い・易・ダイス・ジオマンシーは乱数だけで完結するので、ここが要るのは
+ * **納甲（cast_hexagram の nakko: true）だけ** ―― 月支と年の境に太陽黄経が要る。
+ * 占星術層の AstroContext と同じものを index.ts から渡している。
+ */
+export interface CardContext {
+  /** 天体計算エンジン（納甲だけが使う。nakko を付けない限り触らない） */
+  getEngine?: () => Promise<SwissEph>;
+  /** テストから時刻を固定するための差し込み口（既定は現在時刻） */
+  now?: () => Date;
+}
+
 /** POST /mcp の本体 */
-export async function handleMcpRequest(request: Request): Promise<Response> {
+export async function handleMcpRequest(
+  request: Request,
+  context: CardContext = {},
+): Promise<Response> {
   const parsed = await readJsonRpcRequest(request);
   if (!parsed.ok) return parsed.response;
   const { id, method } = parsed.value;
@@ -645,7 +860,7 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
 
     case "tools/call": {
       const params = (parsed.value.params ?? {}) as { name?: unknown; arguments?: unknown };
-      return jsonRpcResult(id, callTool(params.name, params.arguments));
+      return jsonRpcResult(id, await callTool(params.name, params.arguments, context));
     }
 
     default:

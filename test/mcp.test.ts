@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
+import { handleMcpRequest } from "../src/mcp";
 import { getDeck } from "../src/decks";
+import { makeFakeEngine } from "./stubs/fake-engine";
 
 const ENDPOINT = "http://localhost/mcp";
 
@@ -15,6 +17,33 @@ async function post(body: unknown): Promise<{ response: Response; json: any }> {
   );
   const text = await response.text();
   return { response, json: text ? JSON.parse(text) : null };
+}
+
+/**
+ * 納甲つきの cast_hexagram を 1 発。
+ *
+ * worker.fetch は本番の engine（テストでは wasm を読まないスタブ）を渡すので、
+ * 中身まで見たいときはハンドラを直に叩いて偽エンジンを注入する
+ * （占星術層のテストと同じ流儀。納甲が使うのは太陽黄経ひとつだけ）。
+ */
+async function castWithEngine(args: Record<string, unknown>): Promise<any> {
+  const engine = makeFakeEngine();
+  engine.offset = 149.6; // 太陽を 149.6°（申月）に置く
+  const response = await handleMcpRequest(
+    new Request(ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 47,
+        method: "tools/call",
+        params: { name: "cast_hexagram", arguments: args },
+      }),
+    }),
+    { getEngine: async () => engine },
+  );
+  const text = await response.text();
+  return JSON.parse(text).result;
 }
 
 describe("initialize", () => {
@@ -55,6 +84,18 @@ describe("initialize", () => {
     // 易占も立てられる
     expect(instructions).toContain("cast_hexagram");
     expect(instructions).toContain("卦辞・爻辞は載せていない");
+  });
+
+  it("instructions に納甲の一文も載る", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 48,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+    const instructions: string = json.result.instructions;
+    expect(instructions).toContain("nakko: true で納甲");
+    expect(instructions).toContain("世応");
   });
 
   it("instructions にアストロダイスの一文も載る", async () => {
@@ -450,6 +491,104 @@ describe("tools/call", () => {
       params: { name: "cast_hexagram", arguments: { method: 3 } },
     });
     expect(wrongType.json.result.isError).toBe(true);
+  });
+
+  it("cast_hexagram は nakko を省くと従来どおり（nakko キーが生えない）", async () => {
+    for (const args of [{}, { method: "yarrow" }, { nakko: false }]) {
+      const { json } = await post({
+        jsonrpc: "2.0",
+        id: 44,
+        method: "tools/call",
+        params: { name: "cast_hexagram", arguments: args },
+      });
+      const result = json.result;
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent.nakko).toBeUndefined();
+      expect(Object.keys(result.structuredContent)).not.toContain("nakko");
+      expect(result.content[0].text).not.toContain("納甲");
+    }
+  });
+
+  it("cast_hexagram は nakko: true で納甲の構造を返す（偽エンジンを注入）", async () => {
+    const result = await castWithEngine({
+      nakko: true,
+      year: 2026,
+      month: 8,
+      day: 22,
+      hour: 21,
+      minute: 30,
+    });
+    expect(result.isError).toBeUndefined();
+
+    // 卦の側は今までどおり載ったまま
+    expect(result.structuredContent.primary.number).toBeGreaterThanOrEqual(1);
+    const nakko = result.structuredContent.nakko;
+    expect(Object.keys(nakko).sort()).toEqual(
+      [
+        "moment",
+        "pillars",
+        "sun_longitude",
+        "palace",
+        "self_line",
+        "other_line",
+        "lines",
+        ...(result.structuredContent.resulting ? ["changed_lines"] : []),
+      ].sort(),
+    );
+    expect(nakko.moment).toEqual({ local: "2026-08-22T21:30+09:00", utc_offset: 9 });
+    // 偽エンジンの太陽は 149.6°（＝申月）に置いてある
+    expect(nakko.pillars).toEqual({
+      year: { stem: "丙", branch: "午", ganzhi: "丙午" },
+      month: { stem: "丙", branch: "申", ganzhi: "丙申" },
+      day: { stem: "戊", branch: "辰", ganzhi: "戊辰" },
+      hour: { stem: "癸", branch: "亥", ganzhi: "癸亥" },
+    });
+    expect(nakko.lines).toHaveLength(6);
+    expect(Object.keys(nakko.lines[0]).sort()).toEqual(
+      ["position", "label", "stem", "branch", "element", "relation", "beast", "is_self", "is_other"].sort(),
+    );
+    expect(nakko.lines.filter((line: { is_self: boolean }) => line.is_self)).toHaveLength(1);
+    expect(nakko.lines.filter((line: { is_other: boolean }) => line.is_other)).toHaveLength(1);
+    expect(nakko.palace.name).toMatch(/^[乾兌離震巽坎艮坤]宮$/);
+    expect(result.content[0].text).toContain("■ 納甲（断易）");
+    expect(result.content[0].text).toContain("丙午年 丙申月 戊辰日 癸亥時");
+  });
+
+  it("cast_hexagram は nakko を立てずに日時を渡されたら断る", async () => {
+    for (const args of [
+      { year: 2026, month: 8, day: 22 },
+      { nakko: false, year: 2026, month: 8, day: 22 },
+      { utc_offset: 0 },
+      { hour: 21 },
+    ]) {
+      const { json } = await post({
+        jsonrpc: "2.0",
+        id: 45,
+        method: "tools/call",
+        params: { name: "cast_hexagram", arguments: args },
+      });
+      expect(json.result.isError, JSON.stringify(args)).toBe(true);
+      expect(json.result.content[0].text).toContain("日時は nakko: true のときだけ使います");
+    }
+  });
+
+  it("cast_hexagram の日時は一部だけの指定を断る", async () => {
+    const result = await castWithEngine({ nakko: true, year: 2026, month: 8 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("year / month / day をそろえて");
+  });
+
+  it("worker 経由の nakko: true は本番の天体計算エンジンを呼ぶ（テストではスタブが断る）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 46,
+      method: "tools/call",
+      params: { name: "cast_hexagram", arguments: { nakko: true } },
+    });
+    // index.ts が getEngine を渡しているので、スタブの拒否がそのまま言い分になる
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("天体計算エンジンを初期化できませんでした");
+    expect(json.result.content[0].text).toContain("テスト環境では wasm を読み込みません");
   });
 
   it("roll_astro_dice は天体×星座×ハウスの組を返す（引数省略で 1 組）", async () => {
@@ -898,6 +1037,9 @@ describe("ルーティング", () => {
  *   2026-08-22 lenormand 追加で更新（list_decks と draw_cards の description・deck の enum・
  *              spread の enum と description。cast_hexagram / roll_astro_dice は無変更）
  *   2026-08-22 cast_geomancy 追加で更新（既存 4 本の定義は 1 文字も変えていない）
+ *   2026-08-22 nakko 追加で更新（cast_hexagram の description に 2 段落と、
+ *              nakko / year / month / day / hour / minute / utc_offset の 7 引数が増えた。
+ *              ほかの 4 本は 1 文字も変えていない）
  */
 const FROZEN_TOOLS = [
   {
@@ -975,7 +1117,7 @@ const FROZEN_TOOLS = [
   {
     "name": "cast_hexagram",
     "title": "易占で卦を立てる",
-    "description": "易占（周易）の卦を立てる（六爻はすべてサーバー側の乱数で決まる）。立てるのはサーバー、読むのは呼び出した側——卦辞・爻辞・彖伝のたぐいは一切返さないので、卦名と爻の並びを見て自分の知識で読むこと。\nmethod: coins=擲銭法（コイン3枚を6回投げる。6/7/8/9 が 1:3:3:1 で変爻が出やすい）、yarrow=本筮法（筮竹50本の三変を6回。老陰1/16・少陽5/16・少陰7/16・老陽3/16 という伝統的な偏り）、abridged=略筮法（筮竹で下卦・上卦・変爻を1回ずつ得る。変爻はちょうど1本）。既定は coins。\n返るのは本卦（序卦の番号・卦名・記号・上下の八卦）、六爻（初爻から上爻へ。老陽・老陰が変爻）、変爻の位、之卦（変爻が無ければ null）、互卦、それにコインの出目や筮竹の本数といった過程。\n自分で「立てたふり」をせず、易を立てる場面では必ずこのツールを呼ぶこと。",
+    "description": "易占（周易）の卦を立てる（六爻はすべてサーバー側の乱数で決まる）。立てるのはサーバー、読むのは呼び出した側——卦辞・爻辞・彖伝のたぐいは一切返さないので、卦名と爻の並びを見て自分の知識で読むこと。\nmethod: coins=擲銭法（コイン3枚を6回投げる。6/7/8/9 が 1:3:3:1 で変爻が出やすい）、yarrow=本筮法（筮竹50本の三変を6回。老陰1/16・少陽5/16・少陰7/16・老陽3/16 という伝統的な偏り）、abridged=略筮法（筮竹で下卦・上卦・変爻を1回ずつ得る。変爻はちょうど1本）。既定は coins。\n返るのは本卦（序卦の番号・卦名・記号・上下の八卦）、六爻（初爻から上爻へ。老陽・老陰が変爻）、変爻の位、之卦（変爻が無ければ null）、互卦、それにコインの出目や筮竹の本数といった過程。\nnakko=true を渡すと納甲（断易・五行易）の表も添える——立卦日時の四柱（年月日時の干支）と、本卦・之卦の各爻の納甲干支、八宮と世応、六親、六獣。これらはすべて卦と日時からの導出で、乱数は 1 ビットも増えない。六親の吉凶や用神の取り方は書かないので、そこも自分の知識で読むこと。\n立卦日時（year / month / day / hour / minute / utc_offset）は nakko=true のときだけ使える。すべて省略すると現在時刻。\n自分で「立てたふり」をせず、易を立てる場面では必ずこのツールを呼ぶこと。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -988,6 +1130,48 @@ const FROZEN_TOOLS = [
           ],
           "default": "coins",
           "description": "立て方。coins=擲銭法（既定） / yarrow=本筮法 / abridged=略筮法"
+        },
+        "nakko": {
+          "type": "boolean",
+          "default": false,
+          "description": "納甲（断易）を添えるか（既定 false）。true にすると立卦日時の四柱と、各爻の納甲干支・八宮と世応・六親・六獣が付く。"
+        },
+        "year": {
+          "type": "integer",
+          "minimum": -5000,
+          "maximum": 5000,
+          "description": "立卦日時の年（nakko=true のときだけ使える）。year / month / day は 3 つそろえて指定する。日時をすべて省略すると現在時刻で立てる。"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "立卦日時の月（1〜12）。"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "立卦日時の日。暦に存在しない日付（2026-02-31 など）は断る。"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "description": "立卦日時の時（0〜23）。省略すると 0 時（12 時ではない）。"
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59,
+          "description": "立卦日時の分（0〜59）。省略すると 0 分。"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "default": 9,
+          "description": "日時をどの土地の時計で読むか（既定 9）。省略時は日本時間。ほかの土地の時計で立てたときはその時差を。"
         }
       },
       "additionalProperties": false
