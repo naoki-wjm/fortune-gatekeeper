@@ -24,9 +24,11 @@ import {
 } from "../mcp";
 import {
   AstroError,
+  CALC_FLAGS,
   DEFAULT_NATAL_ORB,
   DEFAULT_ORB,
   HOUSE_SYSTEM_CODES,
+  SIDEREAL_MODE_LAHIRI,
   anglesOf,
   computeChart,
   computeChartFromJd,
@@ -43,6 +45,7 @@ import {
   houseSystemName,
   julianDay,
   natalAspects,
+  normalizeDegree,
   planetName,
   type AspectPoint,
   type ComputedChart,
@@ -59,6 +62,43 @@ import {
   type MastersOption,
   type NumerologyResult,
 } from "../numerology";
+import {
+  FourPillarsError,
+  SOLAR_TERMS,
+  calculateDateFortune,
+  calculateFourPillars,
+  formatDateFortuneText,
+  formatFourPillarsText,
+  solarTermSpanFromJd,
+  type DateFortuneResult,
+  type FourPillarsResult,
+  type SolarTermSpan,
+} from "../four-pillars";
+import {
+  momentFromDate,
+  monthBranchOrder,
+  sunLongitude,
+  type NakkoMoment,
+} from "../nakko";
+import {
+  AYANAMSA_NAME,
+  SHUKU_COUNT,
+  SHUKU_SPAN,
+  ShukuyoError,
+  compatOf,
+  formatCompatLines,
+  formatShukuLines,
+  formatShukuName,
+  formatRelation,
+  parseShuku,
+  relationOf,
+  shukuAt,
+  shukuIndexOf,
+  shukuOf,
+  toSidereal,
+  type Shuku,
+  type ShukuPosition,
+} from "../shukuyo";
 import {
   BODY_SET_LABEL,
   MAX_DAYS,
@@ -80,6 +120,7 @@ import {
   createChart,
   deleteChart,
   getChart,
+  isChartId,
   listCharts,
   lookupKey,
   putChart,
@@ -124,8 +165,23 @@ const ASTRO_INSTRUCTIONS =
   "（ライフパス 4 経路・バースデー・アティチュード・パーソナルイヤー／マンス／デイ）。" +
   "chart_id か生年月日の直接指定（year / month / day）のどちらかで呼べます" +
   "（登録せずに一度だけ見るときは直接指定を使ってください）。" +
-  "数秘術は誕生日を使うので公開のカード層には無く、この鍵つきの入口だけにあります。\n" +
-  "progressions も chart_id で呼べます（出生データを預かっているチャートが要ります）。";
+  "数秘術は誕生日を使うので公開のカード層には無く、この鍵つきの入口だけにあります。 / " +
+  "shukuyo=宿曜占星術（二十七宿）の本命宿とその日の宿" +
+  "（天文方式＝出生時刻の月のサイデリアル黄経・基準点は Lahiri 固定・27 宿。" +
+  "chart_id か生年月日＋出生時刻の直接指定で呼べます。date で過去も未来も見られます） / " +
+  "shukuyo_compat=2 人の宿の関係（三九の秘法。chart_id でも宿名だけでも呼べるので、" +
+  "相手の出生データを会話に出さずに済みます） / " +
+  "four_pillars=四柱推命（子平）の命式（年月日時の四柱・通変星・十二運・蔵干・空亡・" +
+  "大運は順行と逆行の両方）と、date（省略すると今）の流年・月運・日運。" +
+  "日界 0 時・節気は太陽黄経・時刻の補正なしで、chart_id か生年月日＋出生時刻の直接指定で呼べます" +
+  "（時柱が要るので時刻の分からない出生では引けません）。" +
+  "宿曜も四柱も誕生日を使うのでこの鍵つきの入口だけにあり、" +
+  "**宿の意味はサーバーに載せていません**——読みはあなた自身の知識で。" +
+  "四柱推命も同じで、通変星・十二運・蔵干・大運の意味は載せていません。\n" +
+  "progressions も chart_id で呼べます（出生データを預かっているチャートが要ります）。\n" +
+  "⚠ ホロスコープと宿曜はそれぞれ別の体系です。並べて眺めるのはよいのですが、" +
+  "**三体系（ホロスコープ・宿曜・四柱）を合算する根拠はありません**" +
+  "——点数を足したり多数決を取ったりしないでください。";
 
 // ---------------------------------------------------------------------------
 // ツール定義
@@ -746,6 +802,213 @@ export const ASTRO_TOOLS = [
           description:
             "マスターナンバーとして扱う数（既定 11_22_33）。" +
             "11_22 にすると 33 を認めず 6 まで還元する。",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "shukuyo",
+    title: "宿曜（本命宿とその日の宿）",
+    description:
+      "宿曜占星術（二十七宿）の本命宿と、指定した日の宿（日運）を計算する。\n" +
+      "**天文方式**——宿は出生時刻の月のサイデリアル黄経を 13°20′ で割って決める。" +
+      "基準点（アヤナムシャ）は **Lahiri** に固定（式で出るので天文暦・恒星ファイルが要らない）。" +
+      "暦方式（旧暦の日付から宿を引くやり方）は**採らない**" +
+      "——旧暦は 2033 年問題のように裁定者のいない未解決の規約を含むため。" +
+      "27 宿（牛宿を含まない）で、サイデリアル 0° を**婁宿（Ashvini）**の始まりに置く。" +
+      "『宿曜経』の列挙が昴宿から始まるのは「表の並び」であって、位置の起点ではない。\n" +
+      "**chart_id か、生年月日＋出生時刻の直接指定（year / month / day / hour / minute）の" +
+      "どちらか一方**で呼ぶ。月は 1 日でほぼ 1 宿ぶん動くので、**出生時刻は必須**" +
+      "（時刻の分からない出生では引かない）。\n" +
+      "返るのは (1) 本命宿（漢字の宿名・サンスクリット名・1〜27 の番号）と宿内の位置・両隣の宿・" +
+      "前後の境界までの距離、(2) date（省略すると今日）の月の宿と、本命宿から見た三九の秘法の関係" +
+      "（命・栄・衰・安・危・成・壊・友・親・業・胎＋近距離／中距離／遠距離）、" +
+      "(3) その日のうちに宿が切り替わる時刻。date は**過去も未来も受ける**" +
+      "（日記の日付を後から引き直すときなど）。\n" +
+      "**このツールは解釈をしない**——宿の意味も吉凶もサーバーに載せていないので、" +
+      "読みはあなた自身の知識で。ホロスコープ・宿曜・四柱はそれぞれ別の体系で、" +
+      "**三体系を合算する根拠はない**（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n" +
+      "出生データそのものは返事に出さない（宿・サイデリアル黄経のような派生値だけを返す）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chart_id: {
+          type: "string",
+          description:
+            "対象のチャート ID（list_charts で確認できる）。" +
+            "生年月日の直接指定とはどちらか一方だけを指定する",
+        },
+        year: {
+          type: "integer",
+          description:
+            "出生年（西暦）。登録せずに一度だけ見るときの直接指定で、" +
+            "year / month / day / hour / minute は 5 つそろえて指定する（chart_id とは併用できない）",
+        },
+        month: { type: "integer", minimum: 1, maximum: 12, description: "出生月（1-12）" },
+        day: { type: "integer", minimum: 1, maximum: 31, description: "出生日（1-31）" },
+        hour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description: "出生時刻の「時」（0-23、出生地の現地時刻）。宿は月の位置で決まるので必須",
+        },
+        minute: {
+          type: "integer",
+          minimum: 0,
+          maximum: 59,
+          description: "出生時刻の「分」（0-59、出生地の現地時刻）",
+        },
+        utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          description:
+            "出生地の UTC からの時差（時間単位。日本は 9。省略すると UTC 扱い）。" +
+            "直接指定のときだけ使う（chart_id では預かっている時差を使う）",
+        },
+        date: {
+          type: "string",
+          pattern: "^-?\\d{1,5}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2})?$",
+          description:
+            '日運を見る日 "YYYY-MM-DD"、時刻まで見たいときは "YYYY-MM-DD HH:MM"' +
+            "（省略すると今）。過去も未来も受ける。" +
+            "時刻を省いたときはその日の 0 時の月の宿を返し、切り替わり時刻を別に添える",
+        },
+        date_utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          description:
+            "date と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）。" +
+            "「その日の 0 時〜24 時」の区切りもこの時差の土地の暦で見る",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "shukuyo_compat",
+    title: "宿曜の相性（三九の秘法）",
+    description:
+      "2 つの宿の関係（三九の秘法）を計算する。\n" +
+      "a / b はそれぞれ**登録済みの chart_id か、宿の名前**" +
+      "（漢字「亢宿」「亢」／サンスクリット名「Swati」／1〜27 の番号）。" +
+      "相手の宿名だけでも呼べるので、**相手の出生データを会話に出さずに済む**" +
+      "（まず台帳を chart_id として引き、見つからなければ宿名として読む）。\n" +
+      "返るのは A→B と B→A の関係（本命宿を 1 として数えた距離 1〜27 と、" +
+      "命／栄／衰／安／危／成／壊／友／親／業／胎、近距離・中距離・遠距離）と、" +
+      "向きによらない**組の名前**（命・栄親・友衰・安壊・危成・業胎）。" +
+      "三九の秘法は向きで名前が変わる（A から見て栄なら B から見ると親）ので両方向を返す。\n" +
+      "**このツールは解釈をしない**——関係の意味はサーバーに載せていないので、" +
+      "読みはあなた自身の知識で。ホロスコープ・宿曜・四柱を合算する根拠はない。\n" +
+      "chart_id で呼んだときも出生データは返事に出さない。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        a: {
+          type: "string",
+          description:
+            "片方（chart_id か宿名。「亢宿」「亢」「Swati」「15」のいずれの書き方でもよい）",
+        },
+        b: {
+          type: "string",
+          description: "もう片方（同じ書き方）",
+        },
+      },
+      required: ["a", "b"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "four_pillars",
+    title: "四柱推命（命式と流年・月運・日運）",
+    description:
+      "四柱推命（子平）の命式と、指定した日の流年・月運・日運を計算する。\n" +
+      "**chart_id か、生年月日＋出生時刻の直接指定（year / month / day / hour / minute）の" +
+      "どちらか一方**で呼ぶ。時柱は 2 時間ごとの区切りで決まるので**出生時刻は必須**" +
+      "（時刻の分からない出生では引かない）。\n" +
+      "返るのは (1) 命式（年柱・月柱・日柱・時柱の干支と五行・陰陽、日干から見た通変星と十二運、" +
+      "蔵干＝本気／中気／余気、空亡）、(2) 日主・空亡・節入りからの日数・大運（順行と逆行を 10 柱ずつ）、" +
+      "(3) date（省略すると今）の流年・月運・日運と、命式との天干五合・六合・六沖。" +
+      "date に時刻を付ければ時運（時柱）も出し、日付だけなら年・月・日の三柱で見る。" +
+      "date は**過去も未来も受ける**。\n" +
+      "**採った規約は名前で固定して返り値にも書く**（流派で割れるところが多いので、" +
+      "読む側が「この鯖はこの流派」と分かるように）——" +
+      "日界は 0 時（23 時台生まれのときだけ「日界 23 時」「夜子時」の 2 通りを alternatives に添える）/ " +
+      "時刻の補正なし（経度補正も均時差もかけない。時辰の境から 15 分以内のときだけ印を出し、" +
+      "境からの分数そのものは出さない）/ " +
+      "節気は太陽黄経（立春 315°、30° ごとに月柱が替わる。年柱も立春で切り替える）/ " +
+      "蔵干は本気・中気・余気を全部並べ、通変星は本気で代表する" +
+      "（月律分野表は採らない。代わりに節入りからの日数を返すので、その表で絞りたければ読む側で絞れる）/ " +
+      "十二運は陰干逆行（陽生陰死方式は採らない）/ 空亡は日柱の旬から / " +
+      "大運は性別を預からないので順行・逆行の両方を返し、起運（日数 ÷ 3）は" +
+      "切り上げ・満年齢といった流派の丸めを採らない" +
+      "（返す精度は 0.1 年まで＝出生時刻を約 7 時間の粗さでしか含まない）/ " +
+      "巡りと命式の関係は天干五合・六合・六沖のみ（三合・刑・害は範囲外）。\n" +
+      "**このツールは解釈をしない**——通変星も十二運も蔵干も大運も名前を並べるだけで、" +
+      "格局・用神・強弱・吉凶はサーバーに載せていない。読みはあなた自身の知識で。" +
+      "ホロスコープ・宿曜・四柱はそれぞれ別の体系で、**三体系を合算する根拠はない**" +
+      "（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n" +
+      "出生データそのものは返事に出さない（命式・蔵干・大運のような派生値だけを返す）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chart_id: {
+          type: "string",
+          description:
+            "対象のチャート ID（list_charts で確認できる）。" +
+            "生年月日の直接指定とはどちらか一方だけを指定する",
+        },
+        year: {
+          type: "integer",
+          minimum: 1,
+          maximum: 9999,
+          description:
+            "出生年（西暦）。登録せずに一度だけ見るときの直接指定で、" +
+            "year / month / day / hour / minute は 5 つそろえて指定する（chart_id とは併用できない）",
+        },
+        month: { type: "integer", minimum: 1, maximum: 12, description: "出生月（1-12）" },
+        day: { type: "integer", minimum: 1, maximum: 31, description: "出生日（1-31）" },
+        hour: {
+          type: "integer",
+          minimum: 0,
+          maximum: 23,
+          description:
+            "出生時刻の「時」（0-23、出生地の現地時刻）。時柱を立てるので必須。" +
+            "23 時台のときは日界の代替（日界 23 時・夜子時）も添える",
+        },
+        minute: {
+          type: "integer",
+          minimum: 0,
+          maximum: 59,
+          description: "出生時刻の「分」（0-59、出生地の現地時刻）",
+        },
+        utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          description:
+            "出生地の UTC からの時差（時間単位。日本は 9。省略すると UTC 扱い）。" +
+            "直接指定のときだけ使う（chart_id では預かっている時差を使う）",
+        },
+        date: {
+          type: "string",
+          pattern: "^-?\\d{1,5}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2})?$",
+          description:
+            '流年・月運・日運を見る日 "YYYY-MM-DD"、時運（時柱）まで見たいときは' +
+            ' "YYYY-MM-DD HH:MM"（省略すると今）。過去も未来も受ける',
+        },
+        date_utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          description:
+            "date と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）。" +
+            "日運の日界（0 時）もこの時差の土地の暦で見る",
         },
       },
       additionalProperties: false,
@@ -2119,6 +2382,677 @@ async function runCalculateNumerology(
 }
 
 // ---------------------------------------------------------------------------
+// 宿曜（二十七宿）
+// ---------------------------------------------------------------------------
+
+/** 月の天体 ID（PLANETS の並びと同じ） */
+const MOON_ID = 1;
+
+/** 1 日のうちに宿が切り替わる回数の上限（月は 1 宿に 21〜27 時間いるので、多くて 2 回） */
+const MAX_SHUKU_CHANGES = 3;
+
+/** その瞬間の月のトロピカル黄経 */
+function moonLongitude(swe: SwissEph, jd: number): number {
+  return normalizeDegree(swe.swe_calc_ut(jd, MOON_ID, CALC_FLAGS)[0] as number);
+}
+
+/**
+ * その瞬間の月の宿（サイデリアル）。
+ *
+ * ⚠ **アヤナムシャの値は呼び出し側へ返さないこと**（出生の瞬間で引いたぶんは）。
+ *    Lahiri は 50″/年ほどで動くので、小数 4 桁まで出すと値そのものが「生まれた年月」の目盛りになる
+ *    ――出生データを返事に出さない約束に触れる。日運のように**呼び出し側が日付を指定した瞬間**の
+ *    アヤナムシャは、その日付がもともと会話に出ているので返してよい。
+ */
+function shukuAtJd(swe: SwissEph, jd: number): { position: ShukuPosition; ayanamsa: number } {
+  const ayanamsa = swe.swe_get_ayanamsa_ut(jd);
+  return { position: shukuOf(toSidereal(moonLongitude(swe, jd), ayanamsa)), ayanamsa };
+}
+
+/**
+ * 窓（startJd 以上 endJd 未満）の中で月が宿の境界を越える瞬間を拾う。
+ *
+ * 月は逆行しないので、境界は必ず前から順に 1 つずつ越える。探索は returns.ts の crossUt
+ * （＝壊れた wrapper のエラーチェックを呼び出し側で検算するやつ）を借りる。
+ * ⚠ `swe_mooncross_ut` が探すのは**トロピカル黄経**なので、サイデリアルの境界に
+ *    アヤナムシャを足し戻してから渡す。アヤナムシャは 1 日で 4e-5° しか動かず、
+ *    月足（13°/日）に直すと 0.3 秒未満なので、窓の頭の値を使い回して構わない。
+ */
+function moonShukuChanges(
+  swe: SwissEph,
+  startJd: number,
+  endJd: number,
+  ayanamsa: number,
+): { jd: number; from: Shuku; to: Shuku }[] {
+  let index = shukuIndexOf(toSidereal(moonLongitude(swe, startJd), ayanamsa));
+  const changes: { jd: number; from: Shuku; to: Shuku }[] = [];
+  let cursor = startJd;
+
+  for (let guard = 0; guard < MAX_SHUKU_CHANGES; guard++) {
+    const nextIndex = (index + 1) % SHUKU_COUNT;
+    const targetTropical = normalizeDegree(nextIndex * SHUKU_SPAN + ayanamsa);
+    const jd = crossUt(swe, "moon", targetTropical, cursor);
+    if (jd >= endJd) break;
+    changes.push({ jd, from: shukuAt(index), to: shukuAt(nextIndex) });
+    index = nextIndex;
+    cursor = jd;
+  }
+  return changes;
+}
+
+/** 出生の瞬間と、その出どころ（返事の見出しに使う。値そのものは出さない） */
+interface BirthMoment {
+  moment: MomentInput;
+  /** chart=台帳が預かっているぶん / direct=呼び出しで直接指定されたぶん */
+  source: "chart" | "direct";
+  chartId?: string;
+  label?: string;
+}
+
+/** 出生の瞬間の取り方をツールごとに変えるところ（断り文と、直接指定で受ける年の範囲） */
+interface BirthMomentOptions {
+  /** 「5 つをそろえて」の断り文に挟む理由（なぜ時刻まで要るのか） */
+  reason: string;
+  /** 直接指定で受ける年の下限・上限 */
+  yearMin: number;
+  yearMax: number;
+}
+
+/** 宿曜（月は 1 日でほぼ 1 宿ぶん動く） */
+const SHUKUYO_BIRTH_OPTIONS: BirthMomentOptions = {
+  reason: "宿は出生時刻の月の位置で決まり、月は 1 日でほぼ 1 宿ぶん動くので",
+  yearMin: -5000,
+  yearMax: 5000,
+};
+
+/** 四柱推命（時柱は 2 時間ごと。純関数が西暦 1〜9999 でしか立てないので範囲もそろえる） */
+const FOUR_PILLARS_BIRTH_OPTIONS: BirthMomentOptions = {
+  reason: "時柱は出生時刻の 2 時間ごとの区切りで決まるので",
+  yearMin: 1,
+  yearMax: 9999,
+};
+
+/**
+ * 出生の瞬間（時刻まで）をどこから取るかを決める。宿曜と四柱推命の共通の入り口。
+ *
+ * calculate_numerology の resolveNumerologyBirth と同じ規則（chart_id か直接指定のどちらか一方）だが、
+ * **時刻まで要る**のが違い ―― 宿も時柱も出生時刻で変わるので、時刻不明の出生は受けない。
+ * 「なぜ時刻が要るのか」だけツールごとに違うので options.reason で差し替える。
+ */
+async function resolveBirthMoment(
+  args: Record<string, unknown>,
+  context: AstroContext,
+  options: BirthMomentOptions,
+): Promise<BirthMoment | { error: ToolResult }> {
+  const chartId = optionalString(args, "chart_id", 32);
+  const year = optionalInteger(args, "year", options.yearMin, options.yearMax);
+  const month = optionalInteger(args, "month", 1, 12);
+  const day = optionalInteger(args, "day", 1, 31);
+  const hour = optionalInteger(args, "hour", 0, 23);
+  const minute = optionalInteger(args, "minute", 0, 59);
+  const utcOffset = optionalNumber(args, "utc_offset", -14, 14);
+  const givenBirth = [year, month, day, hour, minute, utcOffset].filter(
+    (value) => value !== undefined,
+  ).length;
+
+  if (chartId !== undefined && givenBirth > 0) {
+    throw new AstroError(
+      "chart_id と出生データ（year / month / day / hour / minute / utc_offset）は、" +
+        "どちらか一方にしてください" +
+        "（登録済みのチャートから引くなら chart_id、登録せずに一度だけ見るなら生年月日と時刻）",
+    );
+  }
+
+  if (chartId === undefined) {
+    if (givenBirth === 0) {
+      throw new AstroError(
+        "chart_id か year / month / day / hour / minute を指定してください" +
+          "（登録済みのチャートから引くなら chart_id、登録せずに一度だけ見るなら生年月日と出生時刻）",
+      );
+    }
+    if (
+      year === undefined ||
+      month === undefined ||
+      day === undefined ||
+      hour === undefined ||
+      minute === undefined
+    ) {
+      throw new AstroError(
+        "生年月日と出生時刻は year / month / day / hour / minute の 5 つをそろえて指定してください" +
+          `（${options.reason}、` +
+          "時刻の分からない出生では引けません。utc_offset だけは省略でき、そのときは UTC 扱いです）",
+      );
+    }
+    assertCalendarDay(year, month, day);
+    return {
+      moment: { year, month, day, hour, minute, utcOffset: utcOffset ?? 0 },
+      source: "direct",
+    };
+  }
+
+  const chart = await getChart(context.kv, context.auth.user, chartId);
+  if (!chart) {
+    return {
+      error: toolError(
+        `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
+          "save_chart で登録してください。",
+      ),
+    };
+  }
+  const birth = chart.birth;
+  if (!birth) {
+    return {
+      error: toolError(
+        "このチャートには出生データが入っていません（出生データを保存しない時代の登録です）。" +
+          "delete_chart で消して save_chart で登録し直すと使えます。",
+      ),
+    };
+  }
+  return {
+    moment: {
+      year: birth.year,
+      month: birth.month,
+      day: birth.day,
+      hour: birth.hour,
+      minute: birth.minute,
+      utcOffset: birth.utc_offset,
+    },
+    source: "chart",
+    chartId,
+    label: chart.label,
+  };
+}
+
+/**
+ * 日運を見る瞬間（date / date_utc_offset から決めたもの）。
+ * 宿曜と四柱推命で共用する（どちらも「date は省略すると今、時刻を省けばその日の 0 時」の流儀）。
+ */
+interface FortuneDay {
+  /** 見る瞬間（UTC） */
+  at: Date;
+  /** その瞬間を含む暦日（date_utc_offset の暦） */
+  date: { year: number; month: number; day: number };
+  /** 時刻まで指定されたか（date に時刻が無ければ 0 時で見る） */
+  hasTime: boolean;
+  /** date を省いて「今」になったか */
+  isNow: boolean;
+  utcOffset: number;
+}
+
+/** "YYYY-MM-DD" または "YYYY-MM-DD HH:MM"（区切りは半角空白でも T でもよい） */
+function parseFortuneDate(raw: string, utcOffset: number): FortuneDay {
+  const matched = /^(-?\d{1,5})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?$/.exec(raw);
+  if (!matched) {
+    throw new AstroError(
+      `date は "YYYY-MM-DD" か "YYYY-MM-DD HH:MM" の形で指定してください` +
+        `（例: 2026-08-22 / 2026-08-22 08:30）: ${raw}`,
+    );
+  }
+  const year = Number(matched[1]);
+  const month = Number(matched[2]);
+  const day = Number(matched[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    throw new AstroError(`date の月日が暦の範囲を外れています（月は 1〜12、日は 1〜31）: ${raw}`);
+  }
+  assertCalendarDay(year, month, day);
+
+  const hasTime = matched[4] !== undefined;
+  const hour = hasTime ? Number(matched[4]) : 0;
+  const minute = hasTime ? Number(matched[5]) : 0;
+  if (hour > 23 || minute > 59) {
+    throw new AstroError(`date の時刻が範囲を外れています（時は 0〜23、分は 0〜59）: ${raw}`);
+  }
+
+  return {
+    at: utcDateFromLocal(year, month, day, hour, minute, utcOffset),
+    date: { year, month, day },
+    hasTime,
+    isNow: false,
+    utcOffset,
+  };
+}
+
+/** date を省いたとき＝「今」。暦日は date_utc_offset の土地の暦で決める */
+function fortuneDayFromNow(now: Date, utcOffset: number): FortuneDay {
+  const shifted = new Date(now.getTime() + utcOffset * 3_600_000);
+  return {
+    at: now,
+    date: {
+      year: shifted.getUTCFullYear(),
+      month: shifted.getUTCMonth() + 1,
+      day: shifted.getUTCDate(),
+    },
+    hasTime: true,
+    isNow: true,
+    utcOffset,
+  };
+}
+
+/** 返り値に添える「このサーバーが採った規約」。名前で書くのは読む側が流派を確かめられるように */
+const SHUKUYO_SYSTEM = {
+  method: "astronomical",
+  method_label: "天文方式（出生時刻の月のサイデリアル黄経 ÷ 13°20′）",
+  ayanamsa: AYANAMSA_NAME,
+  ayanamsa_id: SIDEREAL_MODE_LAHIRI,
+  mansions: SHUKU_COUNT,
+  span_degrees: SHUKU_SPAN,
+  origin: "婁宿（Ashvini）＝サイデリアル 0°",
+  calendar_note:
+    "暦方式（旧暦の日付から宿を引くやり方）は採らない" +
+    "（旧暦は 2033 年問題のように裁定者のいない未解決の規約を含むため）",
+  note: "『宿曜経』の列挙は昴宿から始まるが、それは表の並びであって位置の起点ではない",
+} as const;
+
+const SHUKUYO_NO_READING_NOTE =
+  "（宿の意味・吉凶はこのサーバーに載っていません。読みはあなた自身の知識で。" +
+  "ホロスコープ・宿曜・四柱は別々の体系で、合算する根拠はありません）";
+
+/** 規約の 1 行（テキストの末尾に置く） */
+const SHUKUYO_SYSTEM_LINE =
+  `規約: ${SHUKUYO_SYSTEM.method_label} / 基準点 ${AYANAMSA_NAME}（SE_SIDM_LAHIRI）/ ` +
+  `${SHUKU_COUNT} 宿・${SHUKUYO_SYSTEM.origin} / ${SHUKUYO_SYSTEM.calendar_note}`;
+
+/**
+ * 宿曜（本命宿とその日の宿）。
+ *
+ * 出生データは返事に出さない ―― 出すのは派生値（宿・宿内の位置・サイデリアル黄経）だけ。
+ * 出生時のアヤナムシャも出さない（値そのものが生まれた年月の目盛りになるため）。
+ */
+async function runShukuyo(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const resolved = await resolveBirthMoment(args, context, SHUKUYO_BIRTH_OPTIONS);
+  if ("error" in resolved) return resolved.error;
+
+  const dateOffset = optionalNumber(args, "date_utc_offset", -14, 14) ?? 0;
+  const rawDate = optionalString(args, "date", 24);
+  const now = context.now ? context.now() : new Date();
+  const day = rawDate === undefined
+    ? fortuneDayFromNow(now, dateOffset)
+    : parseFortuneDate(rawDate, dateOffset);
+
+  const swe = await engineOf(context);
+
+  // 本命宿（アヤナムシャは受け取るだけで返さない）
+  const natal = shukuAtJd(swe, julianDay(swe, resolved.moment)).position;
+
+  // その日の宿
+  const dayJd = julianDay(swe, momentFromUtcDate(day.at));
+  const today = shukuAtJd(swe, dayJd);
+  const relation = relationOf(natal.shuku.number - 1, today.position.shuku.number - 1);
+
+  // その暦日（0 時〜24 時）の切り替わり
+  const windowStart = utcDateFromLocal(day.date.year, day.date.month, day.date.day, 0, 0, dateOffset);
+  const windowStartJd = julianDay(swe, momentFromUtcDate(windowStart));
+  const changes = moonShukuChanges(swe, windowStartJd, windowStartJd + 1, today.ayanamsa);
+
+  const dateLabel = `${day.date.year}-${pad(day.date.month)}-${pad(day.date.day)}`;
+  const calendarNote = dateOffset === 0 ? "UTC の暦" : `${formatOffsetLabel(dateOffset)} の暦`;
+  const heading =
+    resolved.source === "chart"
+      ? `チャート: ${resolved.label}（${resolved.chartId}）`
+      : "出生データ: 直接指定（値は返事に出しません）";
+
+  const lines: string[] = [
+    `宿曜（天文方式・${AYANAMSA_NAME} アヤナムシャ・二十七宿）`,
+    heading,
+    SHUKUYO_NO_READING_NOTE,
+    "",
+    "■ 本命宿（出生時刻の月）",
+    ...formatShukuLines(natal),
+    "（月は 1 日でほぼ 1 宿ぶん動きます。宿内の位置が境界に近いときは、隣の宿も併せて見てください）",
+    "",
+    `■ その日の宿 ${dateLabel}（${calendarNote}）`,
+    `対象の瞬間: ${formatUtcMoment(day.at)}` +
+      (dateOffset === 0 ? "" : ` / ローカル ${formatLocalMoment(day.at, dateOffset)}`) +
+      (day.isNow ? "（現在時刻）" : day.hasTime ? "" : "（時刻の指定が無いので 0 時で見ています）"),
+    ...formatShukuLines(today.position),
+    `本命宿から: ${formatRelation(relation)}`,
+    `アヤナムシャ ${today.ayanamsa.toFixed(4)}°（${AYANAMSA_NAME}）`,
+    "",
+    `□ この日の宿の切り替わり（${calendarNote}の 0 時〜24 時）`,
+  ];
+  if (changes.length === 0) {
+    lines.push("この 24 時間のうちに宿は変わりません（月は 1 宿に 21〜27 時間ほど留まります）");
+  } else {
+    for (const change of changes) {
+      const at = dateFromJulianDay(change.jd);
+      lines.push(
+        `${dateOffset === 0 ? formatUtcMoment(at) : formatLocalMoment(at, dateOffset)} ` +
+          `${change.from.name} → ${formatShukuName(change.to)}`,
+      );
+    }
+  }
+  lines.push("");
+  lines.push(SHUKUYO_SYSTEM_LINE);
+
+  const describe = (position: ShukuPosition) => ({
+    shuku: position.shuku,
+    sidereal_lon: position.sidereal_lon,
+    degrees_in: position.degrees_in,
+    position: position.position,
+    degrees_to_next: position.degrees_to_next,
+    prev: position.prev,
+    next: position.next,
+  });
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: {
+      kind: "shukuyo",
+      source: resolved.source,
+      ...(resolved.source === "chart"
+        ? { chart_id: resolved.chartId, label: resolved.label }
+        : {}),
+      system: SHUKUYO_SYSTEM,
+      // 出生時のアヤナムシャは載せない（生まれた年月の目盛りになるため）
+      natal: describe(natal),
+      day: {
+        date: dateLabel,
+        utc: day.at.toISOString(),
+        local: formatPlainMoment(day.at, dateOffset),
+        utc_offset: dateOffset,
+        is_now: day.isNow,
+        has_time: day.hasTime,
+        ayanamsa: today.ayanamsa,
+        ...describe(today.position),
+        relation,
+        changes: changes.map((change) => {
+          const at = dateFromJulianDay(change.jd);
+          return {
+            utc: at.toISOString(),
+            local: formatPlainMoment(at, dateOffset),
+            from: change.from,
+            to: change.to,
+          };
+        }),
+      },
+    },
+  };
+}
+
+/** shukuyo_compat の片側（chart_id から引いたか、宿名で渡されたか） */
+interface CompatParty {
+  shuku: Shuku;
+  source: "chart" | "name";
+  chartId?: string;
+  label?: string;
+  /** テキストの見出しに使う札 */
+  display: string;
+}
+
+/**
+ * a / b の片側を宿に直す。
+ *
+ * **先に台帳を chart_id として引き、載っていなければ宿名として読む**（この順に意味がある
+ * ―― サンスクリット名は "hasta" のように chart_id の形と見分けが付かないので、
+ * 実在する登録を優先し、無ければ名前と解釈する）。
+ */
+async function resolveCompatParty(
+  raw: string,
+  key: "a" | "b",
+  context: AstroContext,
+  engine: () => Promise<SwissEph>,
+): Promise<CompatParty | { error: ToolResult }> {
+  if (isChartId(raw)) {
+    const chart = await getChart(context.kv, context.auth.user, raw);
+    if (chart) {
+      if (!chart.birth) {
+        return {
+          error: toolError(
+            `${key} に指定したチャート ${raw} には出生データが入っていません` +
+              "（出生データを保存しない時代の登録です）。" +
+              "delete_chart で消して save_chart で登録し直すか、宿名を直接指定してください。",
+          ),
+        };
+      }
+      const swe = await engine();
+      const moment: MomentInput = {
+        year: chart.birth.year,
+        month: chart.birth.month,
+        day: chart.birth.day,
+        hour: chart.birth.hour,
+        minute: chart.birth.minute,
+        utcOffset: chart.birth.utc_offset,
+      };
+      return {
+        shuku: shukuAtJd(swe, julianDay(swe, moment)).position.shuku,
+        source: "chart",
+        chartId: raw,
+        label: chart.label,
+        display: `チャート ${chart.label}（${raw}）`,
+      };
+    }
+  }
+
+  // 宿名として読む（読めなければ ShukuyoError → 呼び出し側で AstroError に着替えさせる）
+  const shuku = parseShuku(raw, `${key} の宿`);
+  return { shuku, source: "name", display: "宿名指定" };
+}
+
+/**
+ * 宿曜の相性（三九の秘法）。
+ *
+ * 天体計算をするのは chart_id で呼ばれた側だけ ―― 両方が宿名なら wasm には触らない。
+ */
+async function runShukuyoCompat(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const rawA = requireString(args, "a", 40);
+  const rawB = requireString(args, "b", 40);
+
+  // エンジンは chart_id が来たときだけ起こす（宿名だけなら天体計算は 1 回も走らない）
+  const engine = () => engineOf(context);
+  const partyA = await resolveCompatParty(rawA, "a", context, engine);
+  if ("error" in partyA) return partyA.error;
+  const partyB = await resolveCompatParty(rawB, "b", context, engine);
+  if ("error" in partyB) return partyB.error;
+
+  const compat = compatOf(partyA.shuku.number - 1, partyB.shuku.number - 1);
+
+  const lines = [
+    "宿曜の相性（三九の秘法）",
+    ...formatCompatLines(compat, partyA.display, partyB.display),
+    SHUKUYO_NO_READING_NOTE,
+    SHUKUYO_SYSTEM_LINE,
+  ];
+
+  const describe = (party: CompatParty) => ({
+    source: party.source,
+    ...(party.source === "chart" ? { chart_id: party.chartId, label: party.label } : {}),
+    shuku: party.shuku,
+  });
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: {
+      kind: "shukuyo_compat",
+      a: describe(partyA),
+      b: describe(partyB),
+      a_to_b: compat.a_to_b,
+      b_to_a: compat.b_to_a,
+      pair: compat.pair,
+      same: compat.same,
+      system: SHUKUYO_SYSTEM,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 四柱推命（子平）
+// ---------------------------------------------------------------------------
+
+/**
+ * 節入り探索の遡り幅（日）。
+ *
+ * 節の帯（節入りから次の節入り）は太陽が 30° 進む時間＝ 29〜32 日なので、
+ * 40 日戻れば「直前の節入り」が必ず 1 本だけ窓に入る（1 年前の同じ節はもっとずっと手前）。
+ */
+const TERM_LOOKBACK_DAYS = 40;
+
+/**
+ * 節の帯として辻褄が合う長さ（日）。
+ *
+ * 実際は 29〜32 日（近日点まわりの冬が短く、遠日点まわりの夏が長い。
+ * `test/four-pillars-real.test.ts` が本物の wasm で毎回確かめている）。
+ * ここは「壊れた答えを弾く網」なので、実測の外側に少し余裕を持たせてある。
+ */
+const TERM_SPAN_MIN_DAYS = 28;
+const TERM_SPAN_MAX_DAYS = 33;
+
+/** 浮動小数の埃ぶんだけ「節入りちょうどの生まれ」を許す幅（日）＝ 0.1 秒 */
+const TERM_EPSILON_DAYS = 1e-6;
+
+/**
+ * 出生の瞬間を挟む 2 本の節入りから、節の帯の中の位置（＝大運の起運のもと）を出す。
+ *
+ * 太陽黄経 30° ごとの境をそのまま探すので、暦の節入り表は引かない。
+ * ⚠ `swe_solcross_ut` は wrapper のエラーチェックが壊れている（returns.ts の crossUt 参照）。
+ *    crossUt が「開始 jd より後か」を見たうえで、ここでも**帯の形**を検算する
+ *    ―― 前の節入り ≦ 出生 ＜ 次の節入り、帯の長さが節らしいか、の 2 つ。
+ */
+function solarTermSpanAt(swe: SwissEph, birthJd: number, sunLon: number): SolarTermSpan {
+  const order = monthBranchOrder(sunLon);
+  const previousTerm = SOLAR_TERMS[order] as (typeof SOLAR_TERMS)[number];
+  const nextTerm = SOLAR_TERMS[(order + 1) % 12] as (typeof SOLAR_TERMS)[number];
+
+  const nextJd = crossUt(swe, "sun", nextTerm.longitude, birthJd);
+  const previousJd = crossUt(swe, "sun", previousTerm.longitude, birthJd - TERM_LOOKBACK_DAYS);
+
+  const span = nextJd - previousJd;
+  if (
+    previousJd > birthJd + TERM_EPSILON_DAYS ||
+    nextJd <= birthJd ||
+    span < TERM_SPAN_MIN_DAYS ||
+    span > TERM_SPAN_MAX_DAYS
+  ) {
+    // 断り文に jd を出さない（出生の瞬間そのものなので）
+    throw new AstroError(
+      "節入り（月柱の境）を計算できませんでした" +
+        "（天体計算が節の帯として辻褄の合う答えを返しませんでした）。" +
+        "しばらく置いてからもう一度呼んでください。",
+    );
+  }
+
+  const raw = solarTermSpanFromJd(birthJd, previousJd, nextJd);
+  // 節入りちょうどの生まれで −1e-12 のような値になるのを均す（純関数は 0 以上しか受けない）
+  return {
+    days_since_previous: Math.max(0, raw.days_since_previous),
+    days_until_next: raw.days_until_next,
+  };
+}
+
+const FOUR_PILLARS_NO_READING_NOTE =
+  "（通変星・十二運・蔵干・空亡・大運の意味はこのサーバーに載っていません。読みはあなた自身の知識で。" +
+  "ホロスコープ・宿曜・四柱は別々の体系で、合算する根拠はありません）";
+
+/**
+ * 四柱推命（命式と、指定日の流年・月運・日運）。
+ *
+ * 算法は純関数（src/four-pillars.ts と src/nakko.ts）で、ここがやるのは 3 つだけ ――
+ * 出生の瞬間の出どころを決める / wasm で太陽黄経と前後の節入りを出す / 見る日を決める。
+ * エンジンを叩くのは `swe_calc_ut` 2 回（出生と対象日の太陽）と `swe_solcross_ut` 2 回だけ。
+ *
+ * 出生データは返事に出さない ―― 出すのは派生値（干支・蔵干・十二運・空亡・大運）だけ。
+ * jd も出生の瞬間そのものなので、テキストにも structuredContent にも混ぜない。
+ */
+async function runFourPillars(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const resolved = await resolveBirthMoment(args, context, FOUR_PILLARS_BIRTH_OPTIONS);
+  if ("error" in resolved) return resolved.error;
+
+  const dateOffset = optionalNumber(args, "date_utc_offset", -14, 14) ?? 0;
+  const rawDate = optionalString(args, "date", 24);
+  const now = context.now ? context.now() : new Date();
+  const day = rawDate === undefined
+    ? fortuneDayFromNow(now, dateOffset)
+    : parseFortuneDate(rawDate, dateOffset);
+
+  const swe = await engineOf(context);
+
+  // MomentInput と NakkoMoment は同じ形（現地の時計の読み＋時差）
+  const birthMoment: NakkoMoment = resolved.moment;
+  const birthJd = julianDay(swe, birthMoment);
+  const birthSunLon = sunLongitude(swe, birthMoment);
+  const term = solarTermSpanAt(swe, birthJd, birthSunLon);
+
+  let natal: FourPillarsResult;
+  try {
+    natal = calculateFourPillars({ moment: birthMoment, sun_longitude: birthSunLon, term });
+  } catch (error) {
+    // 純関数の言い分には出生データの値が混じり得るので、そのままは返さない
+    if (error instanceof FourPillarsError) {
+      throw new AstroError(
+        "その出生データからは命式を立てられませんでした" +
+          "（四柱推命は西暦 1〜9999 年の生年月日で立てます。値は返事に出しません）。",
+      );
+    }
+    throw error;
+  }
+
+  // 対象日は「その土地の時計の読み」で見る（日運の日界 0 時も時運の 2 時間区切りもここで決まる）
+  const targetMoment = momentFromDate(day.at, dateOffset);
+  const targetSunLon = sunLongitude(swe, targetMoment);
+
+  let fortune: DateFortuneResult;
+  try {
+    fortune = calculateDateFortune(natal, {
+      moment: targetMoment,
+      sun_longitude: targetSunLon,
+      include_hour: day.hasTime,
+    });
+  } catch (error) {
+    // こちらの言い分に出るのは**呼び出した側が打った日付**なので、そのまま返してよい
+    if (error instanceof FourPillarsError) throw new AstroError(error.message);
+    throw error;
+  }
+
+  const dateLabel = `${day.date.year}-${pad(day.date.month)}-${pad(day.date.day)}`;
+  const calendarNote = dateOffset === 0 ? "UTC の暦" : `${formatOffsetLabel(dateOffset)} の暦`;
+  const heading =
+    resolved.source === "chart"
+      ? `チャート: ${resolved.label}（${resolved.chartId}）`
+      : "出生データ: 直接指定（値は返事に出しません）";
+
+  const lines: string[] = [
+    "四柱推命（子平・日界 0 時・節気は太陽黄経・時刻の補正なし）",
+    heading,
+    FOUR_PILLARS_NO_READING_NOTE,
+    "",
+    formatFourPillarsText(natal),
+    "",
+    `■ 対象日 ${dateLabel}（${calendarNote}）`,
+    `対象の瞬間: ${formatUtcMoment(day.at)}` +
+      (dateOffset === 0 ? "" : ` / ローカル ${formatLocalMoment(day.at, dateOffset)}`) +
+      (day.isNow
+        ? "（現在時刻）"
+        : day.hasTime
+          ? ""
+          : "（時刻の指定が無いので 0 時で見ています＝時運は出しません）"),
+    formatDateFortuneText(fortune),
+  ];
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: {
+      kind: "four_pillars",
+      source: resolved.source,
+      ...(resolved.source === "chart"
+        ? { chart_id: resolved.chartId, label: resolved.label }
+        : {}),
+      natal,
+      target: {
+        date: dateLabel,
+        utc: day.at.toISOString(),
+        local: formatPlainMoment(day.at, dateOffset),
+        utc_offset: dateOffset,
+        is_now: day.isNow,
+        has_time: day.hasTime,
+      },
+      date_fortune: fortune,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 年間概要（ソーラーリターン年）
 // ---------------------------------------------------------------------------
 
@@ -2448,9 +3382,15 @@ async function callAstroTool(
     if (name === "calculate_numerology") {
       return await runCalculateNumerology(rawArguments, context);
     }
+    if (name === "shukuyo") return await runShukuyo(rawArguments, context);
+    if (name === "shukuyo_compat") return await runShukuyoCompat(rawArguments, context);
+    if (name === "four_pillars") return await runFourPillars(rawArguments, context);
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
     if (error instanceof AstroError) return toolError(error.message);
+    // 宿曜の純関数の言い分（宿名が読めない・表が壊れている）も、そのまま利用者へ返してよい
+    // ―― 出生データは含まれず、書いてあるのは「渡された名前」だけなので
+    if (error instanceof ShukuyoError) return toolError(error.message);
     return toolError(error instanceof Error ? error.message : String(error));
   }
 }

@@ -9,9 +9,16 @@ import {
   type StoredChart,
 } from "../src/astro/store";
 import { calculateNumerology } from "../src/numerology";
+import { calculateFourPillars, type FourPillarsResult } from "../src/four-pillars";
 import type { RandomSource } from "../src/random";
 import { FakeKv } from "./stubs/fake-kv";
-import { FAKE_ASCMC, FAKE_CUSPS, makeFakeEngine, type FakeEngine } from "./stubs/fake-engine";
+import {
+  FAKE_ASCMC,
+  FAKE_CUSPS,
+  FAKE_TROPICAL_YEAR,
+  makeFakeEngine,
+  type FakeEngine,
+} from "./stubs/fake-engine";
 
 const OWNER_KEY = "testkey1234567890abcd";
 const OWNER_RECORD = JSON.stringify({ user: "user1", name: "オーナー", role: "owner" });
@@ -177,6 +184,12 @@ describe("占星術層の initialize / tools/list", () => {
     // chart_id でも生年月日の直接指定でも呼べる。公開層には無い、と言い切る
     expect(instructions).toContain("chart_id か生年月日の直接指定");
     expect(instructions).toContain("公開のカード層には無く");
+    // 宿曜（誕生日を使うので鍵つき層だけ。読みは LLM の知識で）
+    expect(instructions).toContain("shukuyo");
+    expect(instructions).toContain("shukuyo_compat");
+    expect(instructions).toContain("Lahiri");
+    expect(instructions).toContain("宿の意味はサーバーに載せていません");
+    expect(instructions).toContain("三体系（ホロスコープ・宿曜・四柱）を合算する根拠はありません");
     // 二次進行も chart_id 方式（出生データを預かっているチャートが要る）
     expect(instructions).toContain("progressions");
     expect(instructions).toContain("progressions も chart_id で呼べます");
@@ -197,7 +210,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("12 本のツールを返す", async () => {
+  it("15 本のツールを返す", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -213,6 +226,9 @@ describe("占星術層の initialize / tools/list", () => {
       "yearly_overview",
       "transit_events",
       "calculate_numerology",
+      "shukuyo",
+      "shukuyo_compat",
+      "four_pillars",
     ]);
   });
 
@@ -282,6 +298,9 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
       "yearly_overview",
       "transit_events",
       "calculate_numerology",
+      "shukuyo",
+      "shukuyo_compat",
+      "four_pillars",
     ]);
   });
 
@@ -1791,8 +1810,1122 @@ describe("calculate_numerology", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 宿曜
+// ---------------------------------------------------------------------------
+
+/**
+ * 宿曜の見本（2023-03-14 10:00・UTC−7）。
+ *
+ * **Claude の公開日**を借りています ―― 時刻の 10 時は架空、時差は米国太平洋夏時間（PDT。
+ * 2023 年の夏時間は 3/12 から）。人の誕生日と紛れない公開された日付を見本にする、という取り決めです
+ * （1986-12-29 は数秘の境界事例として別の意味でリポにあるので、そちらだけに残します）。
+ * 返事に混じったら "2023" や "03-14" ですぐ見つかります。
+ *
+ * 分が 0 なので「時刻まで使って月を出しているか」は jd の突き合わせだけでは見られません。
+ * そのぶんは直接指定のテストで **1 分ずらすと別の宿になる**ことを見て埋めてあります。
+ */
+const SHUKUYO_BIRTH = {
+  ...BIRTH,
+  label: "宿曜の見本",
+  year: 2023,
+  month: 3,
+  day: 14,
+  hour: 10,
+  minute: 0,
+  utc_offset: -7,
+};
+
+/** 偽エンジンの swe_julday と同じ式（テスト側から jd を先回りして知るため） */
+function fakeJd(year: number, month: number, day: number, utcHour: number): number {
+  return Math.floor(Date.UTC(year, month - 1, day) / 86_400_000) + 2440587.5 + utcHour / 24;
+}
+
+/** SHUKUYO_BIRTH の出生の瞬間（現地 10:00・UTC−7 → UTC では同じ日の 17:00） */
+const SHUKUYO_NATAL_JD = fakeJd(2023, 3, 14, 10 + 7);
+
+/**
+ * 本命宿・日運に置くサイデリアル黄経。
+ *
+ * **宿はこの staged した黄経だけで決まり、出生の日付には依りません**（下の stageShukuyoMoon が
+ * 「出生の瞬間かそれ以外か」で月を置き分けるだけなので）。だから見本の日付を替えても
+ * 期待値の宿は動きません ―― 手計算はこう:
+ *   1 宿 = 360° ÷ 27 = 13°20′。n 番目の宿の頭は (n − 1) × 13°20′。
+ *   ・本命 190°25′ → 15 番目（亢宿 Swati、頭は 14 × 13°20′ = 186°40′）の 3°45′。
+ *     次の境（15 × 13°20′ = 200°）までは 9°35′。両隣は 14 角宿 Chitra / 16 氐宿 Vishakha。
+ *   ・日運 60° → 5 番目（觜宿 Mrigashira、頭は 4 × 13°20′ = 53°20′）の 6°40′。
+ *   ・三九の秘法の距離は (4 − 14) mod 27 + 1 = 18 ＝ 親（中距離・組 栄親）。
+ */
+const NATAL_SIDEREAL = 190 + 25 / 60;
+const DAY_SIDEREAL = 60;
+/**
+ * 出生時のアヤナムシャ（返事に出てはいけない値）。
+ * 見本の年（2023）をなぞった見つけやすい数にしてあります ―― 本物の Lahiri は 2023 年で 24.15° 前後なので、
+ * この値が返事に出ていたら一目で分かります。サイデリアル黄経は
+ * 「staged したトロピカル − アヤナムシャ」で戻るので、宿の期待値はこの数を変えても動きません。
+ */
+const NATAL_AYANAMSA = 20.23;
+/** 日運のアヤナムシャ（こちらは返事に出てよい＝呼び出し側が日付を指定しているので） */
+const DAY_AYANAMSA = 24.2292;
+
+/**
+ * 偽エンジンの月とアヤナムシャを「出生の瞬間」と「それ以外」で切り替える。
+ *
+ * 素の偽エンジンは jd に依らず月を 30° に置くので、本命宿と日運が同じ宿になってしまい
+ * 「取り違えていないか」を見られない。ここで別の宿に置き分ける。
+ * アヤナムシャも分けてあるのは、**出生時のぶんが返事に出ていないこと**を確かめるため。
+ */
+function stageShukuyoMoon(): void {
+  const isNatal = (jd: number): boolean => Math.abs(jd - SHUKUYO_NATAL_JD) < 1e-9;
+  const base = engine.swe_calc_ut;
+  engine.swe_calc_ut = (jd: number, id: number, flags: number): number[] => {
+    const result = base(jd, id, flags);
+    if (id === 1) {
+      result[0] = normalizeDegree(
+        isNatal(jd) ? NATAL_SIDEREAL + NATAL_AYANAMSA : DAY_SIDEREAL + DAY_AYANAMSA,
+      );
+    }
+    return result;
+  };
+  engine.swe_get_ayanamsa_ut = (jd: number): number =>
+    isNatal(jd) ? NATAL_AYANAMSA : DAY_AYANAMSA;
+}
+
+async function saveShukuyoChart(): Promise<string> {
+  const saved = await call("save_chart", SHUKUYO_BIRTH);
+  expect(saved.isError).toBeUndefined();
+  return saved.structuredContent.chart_id as string;
+}
+
+describe("shukuyo", () => {
+  beforeEach(() => {
+    stageShukuyoMoon();
+  });
+
+  it("預かっている出生データから本命宿と、その日の宿・関係を返す", async () => {
+    const chartId = await saveShukuyoChart();
+    const result = await call("shukuyo", { chart_id: chartId, date: "2026-08-22" });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("宿曜（天文方式・Lahiri アヤナムシャ・二十七宿）");
+    expect(text).toContain(`チャート: 宿曜の見本（${chartId}）`);
+
+    // 本命宿: サイデリアル 190°25′ ＝ 亢宿（15 番目、始まりは 14 × 13°20′ = 186°40′）の 3°45′
+    expect(text).toContain("■ 本命宿（出生時刻の月）");
+    expect(text).toContain("亢宿（こうしゅく・Swati・15）");
+    expect(text).toContain("宿内の位置: 3°45′ / 境界まで: 前 3°45′・次 9°35′");
+    expect(text).toContain("両隣: 前 角宿（かくしゅく・Chitra・14）");
+    expect(text).toContain("次 氐宿（ていしゅく・Vishakha・16）");
+
+    // その日の宿: サイデリアル 60° ＝ 觜宿（5 番目、始まりは 4 × 13°20′ = 53°20′）の 6°40′
+    expect(text).toContain("■ その日の宿 2026-08-22（UTC の暦）");
+    expect(text).toContain("觜宿（ししゅく・Mrigashira・5）");
+    expect(text).toContain("宿内の位置: 6°40′");
+    // 亢宿（索引 14）から觜宿（索引 4）は (4 − 14) mod 27 + 1 = 18 ＝ 親・中距離・組 栄親
+    expect(text).toContain("本命宿から: 距離 18 → 親（しん） / 中距離 / 組 栄親");
+    expect(text).toContain("アヤナムシャ 24.2292°（Lahiri）");
+
+    const structured = result.structuredContent;
+    expect(structured.kind).toBe("shukuyo");
+    expect(structured.source).toBe("chart");
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.label).toBe("宿曜の見本");
+    expect(structured.natal.shuku).toMatchObject({ number: 15, name: "亢宿", sanskrit: "Swati" });
+    expect(structured.natal.sidereal_lon).toBeCloseTo(190.4167, 4);
+    expect(structured.natal.position).toBe("3°45′");
+    expect(structured.natal.prev.name).toBe("角宿");
+    expect(structured.natal.next.name).toBe("氐宿");
+    expect(structured.day.shuku).toMatchObject({ number: 5, name: "觜宿" });
+    expect(structured.day.date).toBe("2026-08-22");
+    expect(structured.day.relation).toMatchObject({
+      distance: 18,
+      name: "親",
+      group: "中",
+      group_label: "中距離",
+      pair: "栄親",
+    });
+    expect(structured.day.ayanamsa).toBeCloseTo(24.2292, 6);
+  });
+
+  it("採った規約を名前で返す（Lahiri・天文方式・27 宿・旧暦は採らない）", async () => {
+    const chartId = await saveShukuyoChart();
+    const result = await call("shukuyo", { chart_id: chartId });
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("規約: 天文方式");
+    expect(text).toContain("基準点 Lahiri（SE_SIDM_LAHIRI）");
+    expect(text).toContain("27 宿・婁宿（Ashvini）＝サイデリアル 0°");
+    expect(text).toContain("暦方式（旧暦の日付から宿を引くやり方）は採らない");
+    expect(text).toContain("2033 年問題");
+    // 読みは呼び出した側の仕事。意味も吉凶も書かない
+    expect(text).toContain("宿の意味・吉凶はこのサーバーに載っていません");
+    expect(text).toContain("合算する根拠はありません");
+
+    expect(result.structuredContent.system).toMatchObject({
+      method: "astronomical",
+      ayanamsa: "Lahiri",
+      ayanamsa_id: 1,
+      mansions: 27,
+    });
+    expect(result.structuredContent.system.span_degrees).toBeCloseTo(13 + 20 / 60, 10);
+    expect(result.structuredContent.system.note).toContain("昴宿から始まる");
+  });
+
+  it("date を省くと今で見る（date_utc_offset で日付が変わる）", async () => {
+    const chartId = await saveShukuyoChart();
+
+    // 現在は 2026-08-20 02:15 UTC
+    const now = await call("shukuyo", { chart_id: chartId });
+    expect(now.structuredContent.day.date).toBe("2026-08-20");
+    expect(now.structuredContent.day.is_now).toBe(true);
+    expect(now.structuredContent.day.utc).toBe("2026-08-20T02:15:00.000Z");
+    expect(now.content[0].text).toContain("（現在時刻）");
+
+    // UTC-9 の土地ではまだ 8/19
+    const shifted = await call("shukuyo", { chart_id: chartId, date_utc_offset: -9 });
+    expect(shifted.structuredContent.day.date).toBe("2026-08-19");
+    expect(shifted.content[0].text).toContain("（UTC-9 の暦）");
+
+    // UTC+9 なら同じ日の 11:15
+    const jst = await call("shukuyo", { chart_id: chartId, date_utc_offset: 9 });
+    expect(jst.structuredContent.day.date).toBe("2026-08-20");
+    expect(jst.structuredContent.day.local).toBe("2026-08-20 11:15");
+  });
+
+  it("date に時刻を付けるとその瞬間で、付けなければその日の 0 時で見る", async () => {
+    const chartId = await saveShukuyoChart();
+
+    const noon = await call("shukuyo", {
+      chart_id: chartId,
+      date: "2026-08-22 12:30",
+      date_utc_offset: 9,
+    });
+    expect(noon.structuredContent.day.has_time).toBe(true);
+    expect(noon.structuredContent.day.local).toBe("2026-08-22 12:30");
+    expect(noon.structuredContent.day.utc).toBe("2026-08-22T03:30:00.000Z");
+
+    // T 区切りでも同じ
+    const withT = await call("shukuyo", {
+      chart_id: chartId,
+      date: "2026-08-22T12:30",
+      date_utc_offset: 9,
+    });
+    expect(withT.structuredContent.day.utc).toBe("2026-08-22T03:30:00.000Z");
+
+    const midnight = await call("shukuyo", {
+      chart_id: chartId,
+      date: "2026-08-22",
+      date_utc_offset: 9,
+    });
+    expect(midnight.structuredContent.day.has_time).toBe(false);
+    expect(midnight.structuredContent.day.utc).toBe("2026-08-21T15:00:00.000Z");
+    expect(midnight.content[0].text).toContain("時刻の指定が無いので 0 時で見ています");
+  });
+
+  it("date は過去も未来も受ける（日記の日付を後から引き直せる）", async () => {
+    const chartId = await saveShukuyoChart();
+    for (const date of ["1999-12-31", "2026-08-22", "2087-03-01"]) {
+      const result = await call("shukuyo", { chart_id: chartId, date });
+      expect(result.isError, date).toBeUndefined();
+      expect(result.structuredContent.day.date).toBe(date);
+    }
+  });
+
+  it("その日の宿の切り替わりを時刻つきで並べる", async () => {
+    const chartId = await saveShukuyoChart();
+
+    // 偽エンジンの「通過」は格子で作る。窓（2026-08-22 00:00 UTC から 1 日）に 2 本入るようにする
+    const windowStartJd = fakeJd(2026, 8, 22, 0);
+    // 刻みは 1/4 日の倍数にそろえる（浮動小数のちょうどを踏まないように）
+    engine.moonAnchorJd = windowStartJd + 0.25;
+    engine.moonPeriod = 0.5;
+    engine.crossCalls.length = 0;
+
+    const result = await call("shukuyo", { chart_id: chartId, date: "2026-08-22" });
+    expect(result.isError).toBeUndefined();
+
+    const changes = result.structuredContent.day.changes;
+    expect(changes).toHaveLength(2);
+    // 0.25 日 = 06:00、0.75 日 = 18:00
+    expect(changes[0].utc).toBe("2026-08-22T06:00:00.000Z");
+    expect(changes[1].utc).toBe("2026-08-22T18:00:00.000Z");
+    // 窓の頭の月は 60°＝觜宿。そこから 1 宿ずつ進む
+    expect(changes[0].from.name).toBe("觜宿");
+    expect(changes[0].to.name).toBe("参宿");
+    expect(changes[1].from.name).toBe("参宿");
+    expect(changes[1].to.name).toBe("井宿");
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("□ この日の宿の切り替わり（UTC の暦の 0 時〜24 時）");
+    expect(text).toContain("2026-08-22 06:00 UTC 觜宿 → 参宿（しんしゅく・Ardra・6）");
+
+    // 探すのは「サイデリアルの境界＋アヤナムシャ」＝トロピカルの目標黄経
+    const targets = engine.crossCalls
+      .filter((cross) => cross.kind === "moon")
+      .map((cross) => cross.targetLon);
+    expect(targets[0]).toBeCloseTo(normalizeDegree(5 * (360 / 27) + DAY_AYANAMSA), 9);
+    expect(targets[1]).toBeCloseTo(normalizeDegree(6 * (360 / 27) + DAY_AYANAMSA), 9);
+  });
+
+  it("切り替わらない日は「変わりません」と言う", async () => {
+    const chartId = await saveShukuyoChart();
+    // 既定の偽エンジンは 27.32 日周期なので、1 日の窓には 1 本も入らない
+    const result = await call("shukuyo", { chart_id: chartId, date: "2026-08-22" });
+    expect(result.structuredContent.day.changes).toEqual([]);
+    expect(result.content[0].text).toContain("この 24 時間のうちに宿は変わりません");
+  });
+
+  it("出生データも出生時のアヤナムシャも返事に出さない", async () => {
+    const chartId = await saveShukuyoChart();
+    const result = await call("shukuyo", { chart_id: chartId, date: "2026-08-22" });
+
+    const text: string = result.content[0].text;
+    const json = JSON.stringify(result.structuredContent);
+    for (const secret of ["2023", "03-14", "10:00", "35.6895", "139.6917"]) {
+      expect(text, secret).not.toContain(secret);
+      expect(json, secret).not.toContain(secret);
+    }
+    expect(Object.keys(result.structuredContent)).not.toContain("birth");
+
+    // 出生時のアヤナムシャは伏せる（50″/年で動くので、値そのものが生まれた年月の目盛りになる）
+    expect(text).not.toContain("20.23");
+    expect(json).not.toContain("20.23");
+    expect(Object.keys(result.structuredContent.natal)).not.toContain("ayanamsa");
+    // 日運のぶんは出してよい（呼び出した側が日付を指定しているので）
+    expect(text).toContain("24.2292");
+  });
+
+  it("生年月日＋出生時刻の直接指定でも引ける（登録は要らない）", async () => {
+    const result = await call("shukuyo", {
+      year: 2023,
+      month: 3,
+      day: 14,
+      hour: 10,
+      minute: 0,
+      utc_offset: -7,
+      date: "2026-08-22",
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[1]).toBe("出生データ: 直接指定（値は返事に出しません）");
+    // 台帳を通した場合とまったく同じ宿（違うのは出どころだけ）
+    expect(text).toContain("亢宿（こうしゅく・Swati・15）");
+    expect(result.structuredContent.source).toBe("direct");
+    expect(Object.keys(result.structuredContent)).not.toContain("chart_id");
+    expect(Object.keys(result.structuredContent)).not.toContain("label");
+
+    // 直接指定でも出生データは返事に出さない
+    expect(text).not.toContain("2023");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("2023");
+
+    // 分まで jd に溶けている ―― 1 分ずらすと偽エンジンの「出生の瞬間」から外れて別の宿になる
+    // （見本の分が 0 になったぶん、時刻の取りこぼしはここで見張る）
+    const oneMinuteLater = await call("shukuyo", {
+      year: 2023,
+      month: 3,
+      day: 14,
+      hour: 10,
+      minute: 1,
+      utc_offset: -7,
+      date: "2026-08-22",
+    });
+    expect(oneMinuteLater.isError).toBeUndefined();
+    expect(oneMinuteLater.structuredContent.natal.shuku.name).not.toBe("亢宿");
+  });
+
+  it("時刻不明は受けない（year / month / day だけでは断る）", async () => {
+    for (const partial of [
+      { year: 2023, month: 3, day: 14 },
+      { year: 2023, month: 3, day: 14, hour: 10 },
+      { month: 3, day: 14, hour: 10, minute: 0 },
+      { hour: 10, minute: 0 },
+    ]) {
+      const result = await call("shukuyo", partial);
+      expect(result.isError, JSON.stringify(partial)).toBe(true);
+      expect(result.content[0].text).toContain("5 つをそろえて指定してください");
+      expect(result.content[0].text).toContain("時刻の分からない出生では引けません");
+    }
+
+    // utc_offset だけは省いてよい（UTC 扱い）
+    const utcBirth = await call("shukuyo", {
+      year: 2023,
+      month: 3,
+      day: 14,
+      hour: 10,
+      minute: 0,
+    });
+    expect(utcBirth.isError).toBeUndefined();
+  });
+
+  it("chart_id と直接指定はどちらか一方（両方・どちらも無しは断る）", async () => {
+    const chartId = await saveShukuyoChart();
+
+    const both = await call("shukuyo", {
+      chart_id: chartId,
+      year: 2023,
+      month: 3,
+      day: 14,
+      hour: 10,
+      minute: 0,
+    });
+    expect(both.isError).toBe(true);
+    expect(both.content[0].text).toContain("どちらか一方にしてください");
+
+    const neither = await call("shukuyo", {});
+    expect(neither.isError).toBe(true);
+    expect(neither.content[0].text).toContain(
+      "chart_id か year / month / day / hour / minute を指定してください",
+    );
+
+    // date だけでも「誰の宿か」が決まらないので同じ断り
+    const dateOnly = await call("shukuyo", { date: "2026-08-22" });
+    expect(dateOnly.isError).toBe(true);
+    expect(dateOnly.content[0].text).toContain("chart_id か year / month / day / hour / minute");
+  });
+
+  it("知らない ID・他人のチャート・出生データの無い古い登録を断る", async () => {
+    const unknown = await call("shukuyo", { chart_id: "nosuchid" });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain("チャート nosuchid が見つかりませんでした");
+
+    const chartId = await saveShukuyoChart();
+    const other: AstroContext = { ...context, auth: FRIEND };
+    const peek = await call("shukuyo", { chart_id: chartId }, other);
+    expect(peek.isError).toBe(true);
+    expect(peek.content[0].text).toContain("見つかりませんでした");
+
+    const legacy = await call("shukuyo", { chart_id: putLegacyChart() });
+    expect(legacy.isError).toBe(true);
+    expect(legacy.content[0].text).toContain("このチャートには出生データが入っていません");
+    expect(legacy.content[0].text).toContain("delete_chart で消して save_chart で登録し直す");
+    // 断るだけで宿は 1 つも出さない
+    expect(legacy.content[0].text).not.toContain("本命宿");
+  });
+
+  it("暦に無い日・壊れた date・未知の引数を断る", async () => {
+    const chartId = await saveShukuyoChart();
+
+    const badBirth = await call("shukuyo", {
+      year: 2023,
+      month: 2,
+      day: 31,
+      hour: 10,
+      minute: 0,
+    });
+    expect(badBirth.isError).toBe(true);
+    expect(badBirth.content[0].text).toContain("2023-02-31 は暦に存在しない日付です");
+
+    const badDate = await call("shukuyo", { chart_id: chartId, date: "2026-02-30" });
+    expect(badDate.isError).toBe(true);
+    expect(badDate.content[0].text).toContain("2026-02-30 は暦に存在しない日付です");
+
+    const shapeless = await call("shukuyo", { chart_id: chartId, date: "2026/08/22" });
+    expect(shapeless.isError).toBe(true);
+    expect(shapeless.content[0].text).toContain("date は");
+
+    const badHour = await call("shukuyo", { chart_id: chartId, date: "2026-08-22 25:00" });
+    expect(badHour.isError).toBe(true);
+    expect(badHour.content[0].text).toContain("date の時刻が範囲を外れています");
+
+    const badOffset = await call("shukuyo", { chart_id: chartId, date_utc_offset: 20 });
+    expect(badOffset.isError).toBe(true);
+    expect(badOffset.content[0].text).toContain("date_utc_offset は -14 以上 14 以下");
+
+    // 綴り違いは黙って無視しない（許可キーはツール定義から作っている）
+    const typo = await call("shukuyo", { chart_id: chartId, dates: "2026-08-22" });
+    expect(typo.isError).toBe(true);
+    expect(typo.content[0].text).toContain("未知の引数です: dates");
+    expect(typo.content[0].text).toContain("date_utc_offset");
+  });
+});
+
+describe("shukuyo_compat", () => {
+  beforeEach(() => {
+    stageShukuyoMoon();
+  });
+
+  it("宿名どうしで引ける（漢字・サンスクリット名・番号のどれでも）", async () => {
+    const result = await call("shukuyo_compat", { a: "亢宿", b: "氐宿" });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("宿曜の相性（三九の秘法）");
+    expect(text).toContain("A: 宿名指定 亢宿（こうしゅく・Swati・15）");
+    expect(text).toContain("B: 宿名指定 氐宿（ていしゅく・Vishakha・16）");
+    expect(text).toContain("A → B: 距離 2 → 栄（えい） / 近距離 / 組 栄親");
+    expect(text).toContain("B → A: 距離 27 → 親（しん） / 遠距離 / 組 栄親");
+    expect(text).toContain("組: 栄親");
+
+    const structured = result.structuredContent;
+    expect(structured.kind).toBe("shukuyo_compat");
+    expect(structured.a.source).toBe("name");
+    expect(Object.keys(structured.a)).not.toContain("chart_id");
+    expect(structured.a.shuku.number).toBe(15);
+    expect(structured.b.shuku.number).toBe(16);
+    expect(structured.a_to_b).toMatchObject({ distance: 2, name: "栄", group: "近" });
+    expect(structured.b_to_a).toMatchObject({ distance: 27, name: "親", group: "遠" });
+    expect(structured.pair).toBe("栄親");
+    expect(structured.same).toBe(false);
+
+    // 書き方が違っても同じ答え
+    for (const pair of [
+      { a: "亢", b: "氐" },
+      { a: "Swati", b: "Vishakha" },
+      { a: "swati", b: "visakha" },
+      { a: "15", b: "16" },
+    ]) {
+      const same = await call("shukuyo_compat", pair);
+      expect(same.isError, JSON.stringify(pair)).toBeUndefined();
+      expect(same.structuredContent.a_to_b).toEqual(structured.a_to_b);
+      expect(same.structuredContent.b_to_a).toEqual(structured.b_to_a);
+    }
+  });
+
+  it("宿名だけなら天体計算を 1 回もしない（相手の出生データが要らない）", async () => {
+    const before = engine.juldays.length;
+    const result = await call("shukuyo_compat", { a: "Swati", b: "3" });
+    expect(result.isError).toBeUndefined();
+    expect(engine.juldays.length).toBe(before);
+  });
+
+  it("chart_id を渡すと台帳の本命宿を使う（宿名と混ぜてもよい）", async () => {
+    const chartId = await saveShukuyoChart();
+    const result = await call("shukuyo_compat", { a: chartId, b: "昴宿" });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain(`A: チャート 宿曜の見本（${chartId}） 亢宿（こうしゅく・Swati・15）`);
+    expect(text).toContain("B: 宿名指定 昴宿（ぼうしゅく・Krittika・3）");
+
+    const structured = result.structuredContent;
+    expect(structured.a).toMatchObject({ source: "chart", chart_id: chartId, label: "宿曜の見本" });
+    expect(structured.a.shuku.number).toBe(15);
+    expect(structured.b.source).toBe("name");
+    expect(structured.b.shuku.number).toBe(3);
+    // 亢宿（14）→ 昴宿（2）は (2 − 14) mod 27 + 1 = 16 ＝ 壊・中距離・組 安壊
+    expect(structured.a_to_b).toMatchObject({ distance: 16, name: "壊", group: "中", pair: "安壊" });
+    expect(structured.b_to_a).toMatchObject({ distance: 13, name: "安", group: "中", pair: "安壊" });
+  });
+
+  it("両方 chart_id でもよい（同じチャートなら命）", async () => {
+    const chartId = await saveShukuyoChart();
+    const result = await call("shukuyo_compat", { a: chartId, b: chartId });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.same).toBe(true);
+    expect(result.structuredContent.pair).toBe("命");
+    expect(result.structuredContent.a_to_b).toMatchObject({ distance: 1, name: "命" });
+    expect(result.content[0].text).toContain("組: 命（同じ宿）");
+  });
+
+  it("出生データは返事に出さない（chart_id で呼んでも）", async () => {
+    const chartId = await saveShukuyoChart();
+    const result = await call("shukuyo_compat", { a: chartId, b: "1" });
+
+    const text: string = result.content[0].text;
+    const json = JSON.stringify(result.structuredContent);
+    for (const secret of ["2023", "03-14", "10:00", "35.6895", "139.6917", "20.23"]) {
+      expect(text, secret).not.toContain(secret);
+      expect(json, secret).not.toContain(secret);
+    }
+  });
+
+  it("解釈は載せず、規約だけを名前で言う", async () => {
+    const result = await call("shukuyo_compat", { a: "1", b: "10" });
+    const text: string = result.content[0].text;
+    expect(text).toContain("宿の意味・吉凶はこのサーバーに載っていません");
+    expect(text).toContain("合算する根拠はありません");
+    expect(text).toContain("基準点 Lahiri（SE_SIDM_LAHIRI）");
+    expect(text).not.toContain("吉日");
+    // 婁宿（0）→ 星宿（9）は距離 10 ＝ 業（中距離・組 業胎）
+    expect(result.structuredContent.a_to_b).toMatchObject({
+      distance: 10,
+      name: "業",
+      pair: "業胎",
+    });
+  });
+
+  it("読めない宿名は、何を渡せばよいかを添えて断る", async () => {
+    const unknown = await call("shukuyo_compat", { a: "亢宿", b: "そんな宿はない" });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain("b の宿として読めませんでした");
+    expect(unknown.content[0].text).toContain("1〜27 の番号");
+
+    // 番号の外れも同じ断り（宿は 27 まで）
+    const outOfRange = await call("shukuyo_compat", { a: "28", b: "1" });
+    expect(outOfRange.isError).toBe(true);
+    expect(outOfRange.content[0].text).toContain("a の宿として読めませんでした");
+  });
+
+  it("出生データの無い古い登録は、どちらの側でも登録し直しを案内する", async () => {
+    const legacy = putLegacyChart();
+    const asA = await call("shukuyo_compat", { a: legacy, b: "亢宿" });
+    expect(asA.isError).toBe(true);
+    expect(asA.content[0].text).toContain(`a に指定したチャート ${legacy}`);
+    expect(asA.content[0].text).toContain("出生データが入っていません");
+    expect(asA.content[0].text).toContain("宿名を直接指定");
+
+    const asB = await call("shukuyo_compat", { a: "亢宿", b: legacy });
+    expect(asB.isError).toBe(true);
+    expect(asB.content[0].text).toContain(`b に指定したチャート ${legacy}`);
+  });
+
+  it("他人のチャート ID は宿名として読もうとして断る（棚の中身は覗かせない）", async () => {
+    const chartId = await saveShukuyoChart();
+    const other: AstroContext = { ...context, auth: FRIEND };
+    const peek = await call("shukuyo_compat", { a: chartId, b: "亢宿" }, other);
+    expect(peek.isError).toBe(true);
+    // 「見つからない」ではなく「宿名として読めない」＝登録の有無を漏らさない
+    expect(peek.content[0].text).toContain("a の宿として読めませんでした");
+  });
+
+  it("a / b は必須、未知の引数は断る", async () => {
+    const noB = await call("shukuyo_compat", { a: "亢宿" });
+    expect(noB.isError).toBe(true);
+    expect(noB.content[0].text).toContain("b は必須です");
+
+    const empty = await call("shukuyo_compat", { a: "  ", b: "亢宿" });
+    expect(empty.isError).toBe(true);
+    expect(empty.content[0].text).toContain("a は必須です");
+
+    const typo = await call("shukuyo_compat", { a: "亢宿", b: "氐宿", orb: 5 });
+    expect(typo.isError).toBe(true);
+    expect(typo.content[0].text).toContain("未知の引数です: orb");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 年間概要
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 四柱推命
+// ---------------------------------------------------------------------------
+
+/**
+ * 四柱推命の見本（2022-11-30 10:00・UTC−8）。
+ *
+ * **ChatGPT の公開日**を借りています ―― 時刻の 10 時は架空、時差は米国太平洋時間（PST）。
+ * 人の誕生日と紛れない公開された日付を見本にする、という取り決めです
+ * （1986-12-29 は数秘の境界事例として別の意味でリポにあるので、時刻つきの命式とは並べません）。
+ * 返事に混じったら "2022" や "11-30" ですぐ見つかります。
+ */
+const FOUR_PILLARS_BIRTH = {
+  ...BIRTH,
+  label: "四柱の見本",
+  year: 2022,
+  month: 11,
+  day: 30,
+  hour: 10,
+  minute: 0,
+  utc_offset: -8,
+};
+
+/** FOUR_PILLARS_BIRTH の出生の瞬間（現地 10:00・UTC−8 → UTC では同じ日の 18:00） */
+const FP_NATAL_JD = fakeJd(2022, 11, 30, 10 + 8);
+
+/**
+ * 出生の瞬間に置く太陽黄経（立冬 225° と大雪 255° のあいだ＝亥月。実物も 11 月末は 248° 前後）。
+ *
+ * 端数まで決め打ちなのは、**10 分ちがいの出生で大運が 1 文字も変わらない**ことを見るため
+ * ―― 節入りまでの日数（小数 1 桁）も起運（0.1 年）も、この黄経なら境から 0.028 日ぶん離れる。
+ */
+const FP_NATAL_SUN = 247.98;
+
+/**
+ * 偽エンジンの太陽を「動かす」。
+ *
+ * 素の偽エンジンは太陽を止めたまま（jd に依らず同じ黄経）で、通過だけ 365.24 日の格子で返すので、
+ * 「太陽の位置」と「節入りの時刻」が食い違い、配線の検算（前の節入り ≦ 出生 ＜ 次の節入り）に
+ * 引っかかってしまう。ここで回帰年 1 周の等速太陽に差し替えると、両方が辻褄の合う形になる。
+ */
+function stageMovingSun(): void {
+  engine.sunMotionAnchorJd = FP_NATAL_JD - (FP_NATAL_SUN / 360) * FAKE_TROPICAL_YEAR;
+}
+
+/** 等速太陽での「黄経 x° から y° まで」の日数 */
+function fpDays(degrees: number): number {
+  return (degrees / 360) * FAKE_TROPICAL_YEAR;
+}
+
+async function saveFourPillarsChart(): Promise<string> {
+  const saved = await call("save_chart", FOUR_PILLARS_BIRTH);
+  expect(saved.isError).toBeUndefined();
+  return saved.structuredContent.chart_id as string;
+}
+
+/**
+ * 深い比較のために数値の埃を落とす。
+ *
+ * 配線側は太陽黄経を wasm（偽エンジン）経由で受け取るので 277.5 が 277.50000000019 になり、
+ * その埃が起運の丸め（小数 4 桁）の境目を踏むことがある。命式の中身を突き合わせたいだけなので、
+ * 小数 3 桁で切りそろえてから比べる。
+ */
+function roundDeep<T>(value: T, digits = 3): T {
+  if (typeof value === "number") {
+    const scale = 10 ** digits;
+    return (Math.round(value * scale) / scale) as unknown as T;
+  }
+  if (Array.isArray(value)) return value.map((item) => roundDeep(item, digits)) as unknown as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, roundDeep(item, digits)]),
+    ) as unknown as T;
+  }
+  return value;
+}
+
+/** 配線と同じ道具立てで、期待する命式を純関数から直に組む */
+function expectedNatal(): FourPillarsResult {
+  return calculateFourPillars({
+    moment: { year: 2022, month: 11, day: 30, hour: 10, minute: 0, utcOffset: -8 },
+    sun_longitude: FP_NATAL_SUN,
+    term: {
+      days_since_previous: fpDays(FP_NATAL_SUN - 225),
+      days_until_next: fpDays(255 - FP_NATAL_SUN),
+    },
+  });
+}
+
+describe("four_pillars", () => {
+  beforeEach(() => {
+    stageMovingSun();
+  });
+
+  it("預かっている出生データから命式と、指定日の流年・月運・日運を返す", async () => {
+    const chartId = await saveFourPillarsChart();
+    const result = await call("four_pillars", {
+      chart_id: chartId,
+      date: "2026-08-22",
+      date_utc_offset: 9,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("四柱推命（子平・日界 0 時・節気は太陽黄経・時刻の補正なし）");
+    expect(text).toContain(`チャート: 四柱の見本（${chartId}）`);
+
+    // 2022-11-30 10:00 ＝ 壬寅年・辛亥月（立冬から）・丁亥日・乙巳時
+    expect(text).toContain("■ 四柱推命（命式）");
+    expect(text).toContain("壬(陽水)");
+    expect(text).toContain("日主: 丁（陰火）");
+    expect(text).toContain("空亡（丁亥日＝甲申旬）: 午・未");
+    expect(text).toContain("節入り: 立冬から 23.3 日／次の大雪まで 7.1 日");
+    // 起運は 0.1 年まで（月数は起運 × 12 を整数へ）
+    expect(text).toContain("大運（順行・男性）: 起運 2.4 年（約 29 か月／もとになった日数 7.1 日 ÷ 3）");
+    expect(text).toContain("大運（逆行・女性）: 起運 7.8 年（約 94 か月／もとになった日数 23.3 日 ÷ 3）");
+
+    // 対象日は呼び出し側が指定した日なので、そのまま書く
+    expect(text).toContain("■ 対象日 2026-08-22（UTC+9 の暦）");
+    expect(text).toContain("■ 流年・月運・日運（2026-08-22）");
+    expect(text).toContain("日主 丁 から見た値です");
+
+    const structured = result.structuredContent;
+    expect(structured.kind).toBe("four_pillars");
+    expect(structured.source).toBe("chart");
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.label).toBe("四柱の見本");
+
+    // 命式は純関数の答えそのまま（＝配線が moment / 太陽黄経 / 節入りを正しく渡している）
+    expect(roundDeep(structured.natal)).toEqual(roundDeep(expectedNatal()));
+    expect(structured.natal.sun_longitude).toBeCloseTo(FP_NATAL_SUN, 6);
+    expect(structured.natal.pillars.year.ganzhi).toBe("壬寅");
+    expect(structured.natal.pillars.month.ganzhi).toBe("辛亥");
+    expect(structured.natal.pillars.day.ganzhi).toBe("丁亥");
+    expect(structured.natal.pillars.hour.ganzhi).toBe("乙巳");
+    expect(structured.natal.day_master).toEqual({ stem: "丁", element: "火", yin_yang: "陰" });
+    expect(structured.natal.void).toEqual({ decade: "甲申旬", branches: ["午", "未"] });
+    // 大運は性別を預からないので両向き 10 柱ずつ
+    expect(structured.natal.luck_cycles.forward.pillars).toHaveLength(10);
+    expect(structured.natal.luck_cycles.backward.pillars).toHaveLength(10);
+    expect(structured.natal.luck_cycles.forward.applies_to).toBe("男性");
+    expect(structured.natal.luck_cycles.backward.applies_to).toBe("女性");
+
+    expect(structured.target).toMatchObject({
+      date: "2026-08-22",
+      utc: "2026-08-21T15:00:00.000Z",
+      local: "2026-08-22 00:00",
+      utc_offset: 9,
+      is_now: false,
+      has_time: false,
+    });
+    expect(structured.date_fortune.year.ganzhi).toBe("丙午");
+    expect(structured.date_fortune.month.ganzhi).toBe("丙申");
+    expect(structured.date_fortune.day.ganzhi).toBe("戊辰");
+    expect(structured.date_fortune.day_master).toBe("丁");
+    // 時刻を指定していないので時運は出さない
+    expect(structured.date_fortune.hour).toBeUndefined();
+  });
+
+  it("節入りは太陽黄経で挟んで探す（前の節 ≦ 出生 ＜ 次の節）", async () => {
+    const chartId = await saveFourPillarsChart();
+    engine.crossCalls.length = 0;
+
+    const result = await call("four_pillars", { chart_id: chartId, date: "2026-08-22" });
+    expect(result.isError).toBeUndefined();
+
+    // 太陽の通過は 2 回だけ（次の節＝小寒 285°、前の節＝大雪 255°）
+    const sunCrosses = engine.crossCalls.filter((cross) => cross.kind === "sun");
+    expect(sunCrosses).toHaveLength(2);
+    expect(sunCrosses[0]).toMatchObject({ targetLon: 255 });
+    expect(sunCrosses[0].startJd).toBeCloseTo(FP_NATAL_JD, 9);
+    // 前の節は 40 日戻ってから探す（節の帯は 29〜32 日なので必ず 1 本だけ入る）
+    expect(sunCrosses[1]).toMatchObject({ targetLon: 225 });
+    expect(sunCrosses[1].startJd).toBeCloseTo(FP_NATAL_JD - 40, 9);
+
+    // 起運は「節入りまでの日数 ÷ 3」を小数 1 桁で
+    const cycles = result.structuredContent.natal.luck_cycles;
+    expect(cycles.forward.days_to_term).toBeCloseTo(fpDays(255 - FP_NATAL_SUN), 1);
+    expect(cycles.backward.days_to_term).toBeCloseTo(fpDays(FP_NATAL_SUN - 225), 1);
+    expect(cycles.forward.start_age).toBe(2.4);
+    expect(cycles.forward.start_months).toBe(29);
+    expect(cycles.backward.start_age).toBe(7.8);
+    expect(cycles.backward.start_months).toBe(94);
+  });
+
+  it("節の帯として辻褄が合わない答えは断る（壊れた wrapper の受け止め）", async () => {
+    const chartId = await saveFourPillarsChart();
+    // 太陽の動きだけ素に戻すと、通過は 365.24 日の格子＝出生を挟まなくなる
+    engine.sunMotionAnchorJd = null;
+
+    const result = await call("four_pillars", { chart_id: chartId });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("節入り（月柱の境）を計算できませんでした");
+    // 断り文に jd（＝出生の瞬間そのもの）は出さない
+    expect(result.content[0].text).not.toContain("24");
+  });
+
+  it("採った規約を名前で返す（日界 0 時・時刻補正なし・陰干逆行・月律分野表は採らない）", async () => {
+    const chartId = await saveFourPillarsChart();
+    const result = await call("four_pillars", { chart_id: chartId });
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("規約: 日界 0 時／時刻の補正なし／節気は太陽黄経");
+    expect(text).toContain("蔵干は本気・中気・余気を全列挙（月律分野表は採らない）");
+    expect(text).toContain("十二運は陰干逆行");
+    expect(text).toContain("空亡は日柱から");
+    expect(text).toContain("大運は順逆の両方・起運は 0.1 年まで（流派の丸めは採らない）");
+    // 読みは呼び出した側の仕事
+    expect(text).toContain("通変星・十二運・蔵干・空亡・大運の意味はこのサーバーに載っていません");
+    expect(text).toContain("合算する根拠はありません");
+
+    const conventions = result.structuredContent.natal.conventions;
+    expect(conventions.day_boundary).toContain("日界 0 時");
+    expect(conventions.hidden_stems).toContain("月律分野表");
+    expect(conventions.twelve_stages).toContain("陰干逆行");
+    expect(conventions.luck_cycles).toContain("順行・逆行の両方");
+    // 起運の精度も名前つきの規約として返す（流派の丸めとは別物、と言い切っておく）
+    expect(conventions.luck_start_precision).toContain("0.1 年");
+    expect(conventions.luck_start_precision).toContain("約 7 時間の粗さ");
+    expect(result.structuredContent.date_fortune.conventions.year_pillar).toContain("立春");
+  });
+
+  it("date に時刻を付けると時運（時柱）まで、付けなければ三柱", async () => {
+    const chartId = await saveFourPillarsChart();
+
+    const withTime = await call("four_pillars", {
+      chart_id: chartId,
+      date: "2026-08-22 12:30",
+      date_utc_offset: 9,
+    });
+    expect(withTime.structuredContent.target.has_time).toBe(true);
+    expect(withTime.structuredContent.target.utc).toBe("2026-08-22T03:30:00.000Z");
+    expect(withTime.structuredContent.date_fortune.hour).toBeDefined();
+    expect(withTime.structuredContent.date_fortune.hour.label).toBe("時運");
+    expect(withTime.structuredContent.date_fortune.date).toMatchObject({
+      year: 2026,
+      month: 8,
+      day: 22,
+      hour: 12,
+      minute: 30,
+      utc_offset: 9,
+    });
+    expect(withTime.content[0].text).toContain("■ 流年・月運・日運（2026-08-22 12:30）");
+
+    const dateOnly = await call("four_pillars", {
+      chart_id: chartId,
+      date: "2026-08-22",
+      date_utc_offset: 9,
+    });
+    expect(dateOnly.structuredContent.target.has_time).toBe(false);
+    expect(dateOnly.structuredContent.date_fortune.hour).toBeUndefined();
+    expect(dateOnly.content[0].text).toContain("時刻の指定が無いので 0 時で見ています＝時運は出しません");
+  });
+
+  it("date を省くと今で見る（date_utc_offset で暦が変わる）。過去も未来も受ける", async () => {
+    const chartId = await saveFourPillarsChart();
+
+    // 現在は 2026-08-20 02:15 UTC
+    const now = await call("four_pillars", { chart_id: chartId });
+    expect(now.structuredContent.target.date).toBe("2026-08-20");
+    expect(now.structuredContent.target.is_now).toBe(true);
+    // 「今」は時刻を持っているので時運も出る
+    expect(now.structuredContent.date_fortune.hour).toBeDefined();
+    expect(now.content[0].text).toContain("（現在時刻）");
+
+    // UTC-9 の土地ではまだ 8/19
+    const shifted = await call("four_pillars", { chart_id: chartId, date_utc_offset: -9 });
+    expect(shifted.structuredContent.target.date).toBe("2026-08-19");
+    expect(shifted.content[0].text).toContain("（UTC-9 の暦）");
+
+    for (const date of ["1999-12-31", "2087-03-01"]) {
+      const result = await call("four_pillars", { chart_id: chartId, date });
+      expect(result.isError, date).toBeUndefined();
+      expect(result.structuredContent.target.date).toBe(date);
+    }
+  });
+
+  it("生年月日＋出生時刻の直接指定でも引ける（登録は要らない）", async () => {
+    const result = await call("four_pillars", {
+      year: 2022,
+      month: 11,
+      day: 30,
+      hour: 10,
+      minute: 0,
+      utc_offset: -8,
+      date: "2026-08-22",
+      date_utc_offset: 9,
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[1]).toBe("出生データ: 直接指定（値は返事に出しません）");
+    // 台帳を通した場合とまったく同じ命式（違うのは出どころだけ）
+    expect(roundDeep(result.structuredContent.natal)).toEqual(roundDeep(expectedNatal()));
+    expect(result.structuredContent.source).toBe("direct");
+    expect(Object.keys(result.structuredContent)).not.toContain("chart_id");
+    expect(Object.keys(result.structuredContent)).not.toContain("label");
+
+    // 直接指定でも出生データは返事に出さない
+    expect(text).not.toContain("2022");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("2022");
+  });
+
+  it("23 時台の生まれには日界の代替 2 通りを添える", async () => {
+    const result = await call("four_pillars", {
+      year: 2022,
+      month: 11,
+      day: 30,
+      hour: 23,
+      minute: 10,
+      utc_offset: -8,
+      date: "2026-08-22",
+    });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain("23 時台の生まれです。既定は日界 0 時。ほかの規約なら:");
+    expect(text).toContain("日界23時");
+    expect(text).toContain("夜子時");
+
+    const alternatives = result.structuredContent.natal.alternatives;
+    expect(alternatives).toHaveLength(2);
+    expect(alternatives[0].name).toBe("日界23時");
+    // 既定（日界 0 時）の日柱は丁亥。翌日（2022-12-01）は戊子
+    expect(result.structuredContent.natal.pillars.day.ganzhi).toBe("丁亥");
+    expect(alternatives[0].day.ganzhi).toBe("戊子");
+    expect(alternatives[1].name).toBe("夜子時");
+    expect(alternatives[1].day.ganzhi).toBe("丁亥");
+    // どちらの代替も時柱は翌日の日干（戊）から五鼠遁した子刻＝壬子
+    expect(alternatives[0].hour.ganzhi).toBe("壬子");
+    expect(alternatives[1].hour.ganzhi).toBe("壬子");
+  });
+
+  it("10 分ちがいの出生でも大運は 1 文字も変わらない（起運から出生時刻を逆算させない）", async () => {
+    const born = (hour: number, minute: number) =>
+      call("four_pillars", {
+        year: 2022,
+        month: 11,
+        day: 30,
+        hour,
+        minute,
+        utc_offset: -8,
+        date: "2026-08-22",
+      });
+
+    const a = await born(10, 0);
+    const b = await born(10, 10);
+    expect(a.isError).toBeUndefined();
+    expect(b.isError).toBeUndefined();
+
+    // 別の瞬間であることは太陽黄経で分かる（こちらは月柱を決める派生値なので出している）
+    expect(a.structuredContent.natal.sun_longitude).not.toBe(
+      b.structuredContent.natal.sun_longitude,
+    );
+
+    // それでも大運はまるごと同じ ―― 起運（0.1 年）も月数も、もとになった日数（0.1 日）も
+    expect(a.structuredContent.natal.luck_cycles).toEqual(
+      b.structuredContent.natal.luck_cycles,
+    );
+    expect(a.structuredContent.natal.luck_cycles.forward.start_age).toBe(2.4);
+    expect(a.structuredContent.natal.luck_cycles.forward.start_months).toBe(29);
+    expect(a.structuredContent.natal.luck_cycles.backward.start_age).toBe(7.8);
+    expect(a.structuredContent.natal.luck_cycles.backward.start_months).toBe(94);
+    // 0.1 年より細かい桁は 1 つも出さない（4 桁で返していたころは 26 秒の精度だった）
+    const json = JSON.stringify(a.structuredContent.natal.luck_cycles);
+    expect(json).not.toMatch(/\d+\.\d\d/);
+  });
+
+  it("時辰の境ぎわは印だけ返す（境からの分数は出さない）", async () => {
+    // 10:59 は巳刻（9:00〜11:00）の終わり際＝次の午刻まで 1 分
+    const edge = await call("four_pillars", {
+      year: 2022,
+      month: 11,
+      day: 30,
+      hour: 10,
+      minute: 59,
+      utc_offset: -8,
+    });
+    expect(edge.structuredContent.natal.hour_boundary).toEqual({ side: "次", within_minutes: 15 });
+    expect(edge.content[0].text).toContain("時辰の境（次の午刻）まで 15 分以内");
+    // 「あと 1 分」とは書かない（時支と分数が揃うと出生時刻が分単位で復元できてしまう）
+    expect(JSON.stringify(edge.structuredContent)).not.toContain("59");
+
+    // 境から離れていれば印そのものが出ない
+    const middle = await call("four_pillars", {
+      year: 2022,
+      month: 11,
+      day: 30,
+      hour: 10,
+      minute: 0,
+      utc_offset: -8,
+    });
+    expect(middle.structuredContent.natal.hour_boundary).toBeNull();
+    expect(middle.content[0].text).not.toContain("時辰の境");
+  });
+
+  it("時刻不明は受けない（year / month / day だけでは断る）", async () => {
+    for (const partial of [
+      { year: 2022, month: 11, day: 30 },
+      { year: 2022, month: 11, day: 30, hour: 10 },
+      { month: 11, day: 30, hour: 10, minute: 0 },
+      { hour: 10, minute: 0 },
+    ]) {
+      const result = await call("four_pillars", partial);
+      expect(result.isError, JSON.stringify(partial)).toBe(true);
+      expect(result.content[0].text).toContain("5 つをそろえて指定してください");
+      expect(result.content[0].text).toContain("時柱は出生時刻の 2 時間ごとの区切りで決まるので");
+      expect(result.content[0].text).toContain("時刻の分からない出生では引けません");
+    }
+
+    // utc_offset だけは省いてよい（UTC 扱い）
+    const utcBirth = await call("four_pillars", {
+      year: 2022,
+      month: 11,
+      day: 30,
+      hour: 10,
+      minute: 0,
+    });
+    expect(utcBirth.isError).toBeUndefined();
+  });
+
+  it("chart_id と直接指定はどちらか一方（両方・どちらも無しは断る）", async () => {
+    const chartId = await saveFourPillarsChart();
+
+    const both = await call("four_pillars", {
+      chart_id: chartId,
+      year: 2022,
+      month: 11,
+      day: 30,
+      hour: 10,
+      minute: 0,
+    });
+    expect(both.isError).toBe(true);
+    expect(both.content[0].text).toContain("どちらか一方にしてください");
+    expect(both.content[0].text).not.toContain("命式");
+
+    const neither = await call("four_pillars", {});
+    expect(neither.isError).toBe(true);
+    expect(neither.content[0].text).toContain(
+      "chart_id か year / month / day / hour / minute を指定してください",
+    );
+
+    // date だけでは「誰の命式か」が決まらないので同じ断り
+    const dateOnly = await call("four_pillars", { date: "2026-08-22" });
+    expect(dateOnly.isError).toBe(true);
+    expect(dateOnly.content[0].text).toContain("chart_id か year / month / day / hour / minute");
+  });
+
+  it("知らない ID・他人のチャート・出生データの無い古い登録を断る", async () => {
+    const unknown = await call("four_pillars", { chart_id: "nosuchid" });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain("チャート nosuchid が見つかりませんでした");
+
+    const chartId = await saveFourPillarsChart();
+    const other: AstroContext = { ...context, auth: FRIEND };
+    const peek = await call("four_pillars", { chart_id: chartId }, other);
+    expect(peek.isError).toBe(true);
+    expect(peek.content[0].text).toContain("見つかりませんでした");
+
+    const legacy = await call("four_pillars", { chart_id: putLegacyChart() });
+    expect(legacy.isError).toBe(true);
+    expect(legacy.content[0].text).toContain("このチャートには出生データが入っていません");
+    expect(legacy.content[0].text).toContain("delete_chart で消して save_chart で登録し直す");
+    // 断るだけで命式は 1 柱も出さない
+    expect(legacy.content[0].text).not.toContain("日主");
+  });
+
+  it("出生データそのものは返事に出さない", async () => {
+    const chartId = await saveFourPillarsChart();
+    const result = await call("four_pillars", {
+      chart_id: chartId,
+      date: "2026-08-22",
+      date_utc_offset: 9,
+    });
+
+    const text: string = result.content[0].text;
+    const json = JSON.stringify(result.structuredContent);
+    // 生年月日・出生時刻・出生地の値（見つけやすい数にしてある）
+    for (const secret of ["2022", "11-30", "10:00", "35.6895", "139.6917"]) {
+      expect(text, secret).not.toContain(secret);
+      expect(json, secret).not.toContain(secret);
+    }
+    expect(Object.keys(result.structuredContent)).not.toContain("birth");
+    expect(json).not.toContain('"birth"');
+    // 出生の瞬間のユリウス日も出さない（日時そのものなので）
+    expect(json).not.toContain(String(Math.floor(FP_NATAL_JD)));
+    // 出生の時差（UTC−8）も出さない。返事に出る utc_offset は「対象日を見た暦」のぶんだけ
+    expect(text).not.toContain("UTC-8");
+    expect(result.structuredContent.target.utc_offset).toBe(9);
+    expect(Object.keys(result.structuredContent.natal)).not.toContain("utc_offset");
+  });
+
+  it("暦に無い日・壊れた date・未知の引数を断る", async () => {
+    const chartId = await saveFourPillarsChart();
+
+    const badBirth = await call("four_pillars", {
+      year: 2022,
+      month: 2,
+      day: 31,
+      hour: 10,
+      minute: 0,
+    });
+    expect(badBirth.isError).toBe(true);
+    expect(badBirth.content[0].text).toContain("2022-02-31 は暦に存在しない日付です");
+
+    const badDate = await call("four_pillars", { chart_id: chartId, date: "2026-02-30" });
+    expect(badDate.isError).toBe(true);
+    expect(badDate.content[0].text).toContain("2026-02-30 は暦に存在しない日付です");
+
+    const shapeless = await call("four_pillars", { chart_id: chartId, date: "2026/08/22" });
+    expect(shapeless.isError).toBe(true);
+    expect(shapeless.content[0].text).toContain("date は");
+
+    const badHour = await call("four_pillars", { chart_id: chartId, date: "2026-08-22 25:00" });
+    expect(badHour.isError).toBe(true);
+    expect(badHour.content[0].text).toContain("date の時刻が範囲を外れています");
+
+    const badOffset = await call("four_pillars", { chart_id: chartId, date_utc_offset: 20 });
+    expect(badOffset.isError).toBe(true);
+    expect(badOffset.content[0].text).toContain("date_utc_offset は -14 以上 14 以下");
+
+    // 綴り違いは黙って無視しない（許可キーはツール定義から作っている）
+    const typo = await call("four_pillars", { chart_id: chartId, dates: "2026-08-22" });
+    expect(typo.isError).toBe(true);
+    expect(typo.content[0].text).toContain("未知の引数です: dates");
+    expect(typo.content[0].text).toContain("date_utc_offset");
+  });
+});
 
 describe("yearly_overview", () => {
   /**
@@ -2337,6 +3470,10 @@ describe("chart_id の衝突回避", () => {
  * - 2026-08-22 calculate_numerology を chart_id / 生年月日の直接指定の両受けにして更新
  *   （公開層から移してきたぶん。title・description と、year / month / day の 3 引数が増え、
  *   required が外れた。既存 11 本は 1 文字も動かしていない）
+ * - 2026-08-22 宿曜の shukuyo / shukuyo_compat（13・14 本目）を末尾に追加で更新
+ *   （既存 12 本は 1 文字も動かしていない）
+ * - 2026-08-22 四柱推命の four_pillars（15 本目）を末尾に追加で更新
+ *   （既存 14 本は 1 文字も動かしていない）
  */
 const FROZEN_ASTRO_TOOLS = [
   {
@@ -2916,6 +4053,163 @@ const FROZEN_ASTRO_TOOLS = [
           ],
           "default": "11_22_33",
           "description": "マスターナンバーとして扱う数（既定 11_22_33）。11_22 にすると 33 を認めず 6 まで還元する。"
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "shukuyo",
+    "title": "宿曜（本命宿とその日の宿）",
+    "description": "宿曜占星術（二十七宿）の本命宿と、指定した日の宿（日運）を計算する。\n**天文方式**——宿は出生時刻の月のサイデリアル黄経を 13°20′ で割って決める。基準点（アヤナムシャ）は **Lahiri** に固定（式で出るので天文暦・恒星ファイルが要らない）。暦方式（旧暦の日付から宿を引くやり方）は**採らない**——旧暦は 2033 年問題のように裁定者のいない未解決の規約を含むため。27 宿（牛宿を含まない）で、サイデリアル 0° を**婁宿（Ashvini）**の始まりに置く。『宿曜経』の列挙が昴宿から始まるのは「表の並び」であって、位置の起点ではない。\n**chart_id か、生年月日＋出生時刻の直接指定（year / month / day / hour / minute）のどちらか一方**で呼ぶ。月は 1 日でほぼ 1 宿ぶん動くので、**出生時刻は必須**（時刻の分からない出生では引かない）。\n返るのは (1) 本命宿（漢字の宿名・サンスクリット名・1〜27 の番号）と宿内の位置・両隣の宿・前後の境界までの距離、(2) date（省略すると今日）の月の宿と、本命宿から見た三九の秘法の関係（命・栄・衰・安・危・成・壊・友・親・業・胎＋近距離／中距離／遠距離）、(3) その日のうちに宿が切り替わる時刻。date は**過去も未来も受ける**（日記の日付を後から引き直すときなど）。\n**このツールは解釈をしない**——宿の意味も吉凶もサーバーに載せていないので、読みはあなた自身の知識で。ホロスコープ・宿曜・四柱はそれぞれ別の体系で、**三体系を合算する根拠はない**（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n出生データそのものは返事に出さない（宿・サイデリアル黄経のような派生値だけを返す）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）。生年月日の直接指定とはどちらか一方だけを指定する"
+        },
+        "year": {
+          "type": "integer",
+          "description": "出生年（西暦）。登録せずに一度だけ見るときの直接指定で、year / month / day / hour / minute は 5 つそろえて指定する（chart_id とは併用できない）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "出生月（1-12）"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "出生日（1-31）"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "description": "出生時刻の「時」（0-23、出生地の現地時刻）。宿は月の位置で決まるので必須"
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59,
+          "description": "出生時刻の「分」（0-59、出生地の現地時刻）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "出生地の UTC からの時差（時間単位。日本は 9。省略すると UTC 扱い）。直接指定のときだけ使う（chart_id では預かっている時差を使う）"
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^-?\\d{1,5}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2})?$",
+          "description": "日運を見る日 \"YYYY-MM-DD\"、時刻まで見たいときは \"YYYY-MM-DD HH:MM\"（省略すると今）。過去も未来も受ける。時刻を省いたときはその日の 0 時の月の宿を返し、切り替わり時刻を別に添える"
+        },
+        "date_utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "date と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）。「その日の 0 時〜24 時」の区切りもこの時差の土地の暦で見る"
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "shukuyo_compat",
+    "title": "宿曜の相性（三九の秘法）",
+    "description": "2 つの宿の関係（三九の秘法）を計算する。\na / b はそれぞれ**登録済みの chart_id か、宿の名前**（漢字「亢宿」「亢」／サンスクリット名「Swati」／1〜27 の番号）。相手の宿名だけでも呼べるので、**相手の出生データを会話に出さずに済む**（まず台帳を chart_id として引き、見つからなければ宿名として読む）。\n返るのは A→B と B→A の関係（本命宿を 1 として数えた距離 1〜27 と、命／栄／衰／安／危／成／壊／友／親／業／胎、近距離・中距離・遠距離）と、向きによらない**組の名前**（命・栄親・友衰・安壊・危成・業胎）。三九の秘法は向きで名前が変わる（A から見て栄なら B から見ると親）ので両方向を返す。\n**このツールは解釈をしない**——関係の意味はサーバーに載せていないので、読みはあなた自身の知識で。ホロスコープ・宿曜・四柱を合算する根拠はない。\nchart_id で呼んだときも出生データは返事に出さない。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "string",
+          "description": "片方（chart_id か宿名。「亢宿」「亢」「Swati」「15」のいずれの書き方でもよい）"
+        },
+        "b": {
+          "type": "string",
+          "description": "もう片方（同じ書き方）"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "four_pillars",
+    "title": "四柱推命（命式と流年・月運・日運）",
+    "description": "四柱推命（子平）の命式と、指定した日の流年・月運・日運を計算する。\n**chart_id か、生年月日＋出生時刻の直接指定（year / month / day / hour / minute）のどちらか一方**で呼ぶ。時柱は 2 時間ごとの区切りで決まるので**出生時刻は必須**（時刻の分からない出生では引かない）。\n返るのは (1) 命式（年柱・月柱・日柱・時柱の干支と五行・陰陽、日干から見た通変星と十二運、蔵干＝本気／中気／余気、空亡）、(2) 日主・空亡・節入りからの日数・大運（順行と逆行を 10 柱ずつ）、(3) date（省略すると今）の流年・月運・日運と、命式との天干五合・六合・六沖。date に時刻を付ければ時運（時柱）も出し、日付だけなら年・月・日の三柱で見る。date は**過去も未来も受ける**。\n**採った規約は名前で固定して返り値にも書く**（流派で割れるところが多いので、読む側が「この鯖はこの流派」と分かるように）——日界は 0 時（23 時台生まれのときだけ「日界 23 時」「夜子時」の 2 通りを alternatives に添える）/ 時刻の補正なし（経度補正も均時差もかけない。時辰の境から 15 分以内のときだけ印を出し、境からの分数そのものは出さない）/ 節気は太陽黄経（立春 315°、30° ごとに月柱が替わる。年柱も立春で切り替える）/ 蔵干は本気・中気・余気を全部並べ、通変星は本気で代表する（月律分野表は採らない。代わりに節入りからの日数を返すので、その表で絞りたければ読む側で絞れる）/ 十二運は陰干逆行（陽生陰死方式は採らない）/ 空亡は日柱の旬から / 大運は性別を預からないので順行・逆行の両方を返し、起運（日数 ÷ 3）は切り上げ・満年齢といった流派の丸めを採らない（返す精度は 0.1 年まで＝出生時刻を約 7 時間の粗さでしか含まない）/ 巡りと命式の関係は天干五合・六合・六沖のみ（三合・刑・害は範囲外）。\n**このツールは解釈をしない**——通変星も十二運も蔵干も大運も名前を並べるだけで、格局・用神・強弱・吉凶はサーバーに載せていない。読みはあなた自身の知識で。ホロスコープ・宿曜・四柱はそれぞれ別の体系で、**三体系を合算する根拠はない**（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n出生データそのものは返事に出さない（命式・蔵干・大運のような派生値だけを返す）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）。生年月日の直接指定とはどちらか一方だけを指定する"
+        },
+        "year": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999,
+          "description": "出生年（西暦）。登録せずに一度だけ見るときの直接指定で、year / month / day / hour / minute は 5 つそろえて指定する（chart_id とは併用できない）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "出生月（1-12）"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "出生日（1-31）"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "description": "出生時刻の「時」（0-23、出生地の現地時刻）。時柱を立てるので必須。23 時台のときは日界の代替（日界 23 時・夜子時）も添える"
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59,
+          "description": "出生時刻の「分」（0-59、出生地の現地時刻）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "出生地の UTC からの時差（時間単位。日本は 9。省略すると UTC 扱い）。直接指定のときだけ使う（chart_id では預かっている時差を使う）"
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^-?\\d{1,5}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2})?$",
+          "description": "流年・月運・日運を見る日 \"YYYY-MM-DD\"、時運（時柱）まで見たいときは \"YYYY-MM-DD HH:MM\"（省略すると今）。過去も未来も受ける"
+        },
+        "date_utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "date と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）。日運の日界（0 時）もこの時差の土地の暦で見る"
         }
       },
       "additionalProperties": false

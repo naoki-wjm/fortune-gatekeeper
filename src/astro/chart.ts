@@ -13,6 +13,18 @@
 /** 計算フラグ: SEFLG_MOSEPH(4) | SEFLG_SPEED(256)。Moshier モード固定＝天文暦ファイル不要 */
 export const CALC_FLAGS = 260;
 
+/**
+ * サイデリアル計算の基準点（アヤナムシャ）＝ SE_SIDM_LAHIRI。
+ *
+ * 宿曜（src/shukuyo.ts）がサイデリアル黄経を要るので、engine.ts の初期化直後に
+ * `swe_set_sid_mode(SIDEREAL_MODE_LAHIRI, 0, 0)` を一度だけ呼んである。
+ * Lahiri は**式で出る**基準点なので、天文暦ファイルも恒星ファイルも要らない
+ * （True Chitrapaksha のように恒星の位置を引くものは Moshier 固定と両立しない）。
+ * ⚠ この設定が効くのは SEFLG_SIDEREAL を立てた計算だけで、CALC_FLAGS には入っていない
+ *    ＝ホロスコープ側のトロピカル計算は 1 度も変わらない。
+ */
+export const SIDEREAL_MODE_LAHIRI = 1;
+
 /** グレゴリオ暦（swe_julday の gregflag） */
 const GREGORIAN = 1;
 
@@ -39,6 +51,17 @@ export interface SwissEph {
     eps: number,
     hsys: string,
   ): { cusps: number[]; ascmc: number[] };
+  /**
+   * サイデリアル計算の基準点を選ぶ（宿曜は SIDEREAL_MODE_LAHIRI で固定）。
+   * t0 / ayan_t0 は「自前の基準点」を渡すとき用で、既製の sid_mode では 0 を渡す。
+   * ⚠ 呼ぶのは engine.ts の初期化直後に一度だけ。
+   */
+  swe_set_sid_mode(sidMode: number, t0: number, ayanT0: number): void;
+  /**
+   * その瞬間（UT のユリウス日）のアヤナムシャ（度）。
+   * **サイデリアル黄経 = トロピカル黄経 − これ**（src/shukuyo.ts の toSidereal）。
+   */
+  swe_get_ayanamsa_ut(jd: number): number;
 }
 
 /** 入力が受け付けられなかったときのエラー（JSON-RPC ではなく isError で返す） */

@@ -21,18 +21,26 @@
 import wasmModule from "./sweph/swisseph.wasm";
 import initGlue from "./sweph/swisseph.js";
 import SwissEPH from "./sweph/sweph-wasm.js";
-import type { SwissEph } from "./chart";
+import { SIDEREAL_MODE_LAHIRI, type SwissEph } from "./chart";
 
 /** 診断用。同期 `new WebAssembly.Instance` が弾かれた場合だけ中身が入る */
 export const bootDiagnostics: { syncInstanceError: string | null } = { syncInstanceError: null };
 
 /**
  * wrapper の実体には生えているのに `sweph/sweph-wasm.d.ts` が宣言していないメソッド
- * （swe_mooncross_ut / swe_solcross_ut / swe_houses_armc）を、**複製ファイルに手を入れずに**
+ * （swe_mooncross_ut / swe_solcross_ut / swe_houses_armc / swe_set_sid_mode /
+ * swe_get_ayanamsa_ut）を、**複製ファイルに手を入れずに**
  * 型の上で足すための当て木。sweph/ 配下は astro-viewer からの無改造コピーなので触らない方針。
  */
 type SwephInstance = InstanceType<typeof SwissEPH> &
-  Pick<SwissEph, "swe_mooncross_ut" | "swe_solcross_ut" | "swe_houses_armc">;
+  Pick<
+    SwissEph,
+    | "swe_mooncross_ut"
+    | "swe_solcross_ut"
+    | "swe_houses_armc"
+    | "swe_set_sid_mode"
+    | "swe_get_ayanamsa_ut"
+  >;
 
 function boot(): Promise<SwissEph> {
   return new Promise<SwissEph>((resolve, reject) => {
@@ -55,7 +63,14 @@ function boot(): Promise<SwissEph> {
           return {};
         }
       },
-    }).then((emscripten) => resolve(new SwissEPH(emscripten) as SwephInstance), reject);
+    }).then((emscripten) => {
+      const swe = new SwissEPH(emscripten) as SwephInstance;
+      // 宿曜が使うサイデリアル黄経の基準点を Lahiri に固定する（初期化直後に一度だけ）。
+      // SEFLG_SIDEREAL を立てた計算にしか効かないので、CALC_FLAGS で回している
+      // ホロスコープ側のトロピカル計算はここでは 1 度も変わらない。
+      swe.swe_set_sid_mode(SIDEREAL_MODE_LAHIRI, 0, 0);
+      resolve(swe);
+    }, reject);
   });
 }
 

@@ -23,6 +23,9 @@ export const FAKE_ARMC_ASCMC = [100, 310, 0, 0, 0, 0, 0, 0];
 /** 偽エンジンが返す黄道傾斜（swe_calc_ut の planetId = -1） */
 export const FAKE_EPS = 23.44;
 
+/** sunMotionAnchorJd を立てたときの太陽の 1 周（日）。本物と同じ回帰年 */
+export const FAKE_TROPICAL_YEAR = 365.2422;
+
 export interface FakeEngine extends SwissEph {
   /** 天体位置のずらし幅（度）。テストから書き換える */
   offset: number;
@@ -43,8 +46,27 @@ export interface FakeEngine extends SwissEph {
   /** 周期の位相をずらす（この jd を通過の 1 つとして格子を敷く） */
   moonAnchorJd: number;
   sunAnchorJd: number;
+  /**
+   * 太陽を「動かす」ためのアンカー（UT のユリウス日）。既定の null なら素の作り＝
+   * 太陽も id×30°＋offset に止まったまま、swe_solcross_ut は sunPeriod の格子を返す。
+   *
+   * 数値を入れると、その jd を黄経 0° として太陽が回帰年で 1 周し、
+   * **swe_solcross_ut もその動きと辻褄の合う通過時刻**を返すようになる。
+   * 四柱推命の節入り（太陽黄経 30° ごとの境）のように「太陽の位置と通過時刻が
+   * 食い違っていないこと」に頼る配線を、偽エンジンのまま検算するための口。
+   * 素の作りでは太陽が止まっていて、通過だけ 365.24 日の格子で返るため辻褄が合わない。
+   */
+  sunMotionAnchorJd: number | null;
   /** true にすると通過計算がエラー相当（開始 jd 以下）を返す＝壊れた wrapper の再現 */
   crossFails: boolean;
+  /**
+   * swe_get_ayanamsa_ut が返す値（度）。既定は 0＝「サイデリアルとトロピカルが同じ」で、
+   * 宿曜のテストが 30° 刻みの格子でそのまま計算できる。本物らしい値を見たいときは
+   * 23.85 前後（2000 年ごろの Lahiri）に書き換える。
+   */
+  ayanamsa: number;
+  /** swe_set_sid_mode が受け取った引数の記録（engine.ts が一度だけ呼ぶことの検算用） */
+  sidModeCalls: { sidMode: number; t0: number; ayanT0: number }[];
 }
 
 export function makeFakeEngine(): FakeEngine {
@@ -58,7 +80,10 @@ export function makeFakeEngine(): FakeEngine {
     sunPeriod: 365.24,
     moonAnchorJd: 2_461_000.5,
     sunAnchorJd: 2_461_000.5,
+    sunMotionAnchorJd: null,
     crossFails: false,
+    ayanamsa: 0,
+    sidModeCalls: [],
 
     swe_julday(year: number, month: number, day: number, hour: number, _gregflag: number): number {
       const midnight = Math.floor(Date.UTC(year, month - 1, day) / 86_400_000) + 2440587.5;
@@ -67,9 +92,14 @@ export function makeFakeEngine(): FakeEngine {
       return jd;
     },
 
-    swe_calc_ut(_jd: number, planetId: number, _flags: number): number[] {
+    swe_calc_ut(jd: number, planetId: number, _flags: number): number[] {
       // SE_ECL_NUT（-1）の [0] は真黄道傾斜。天体と同じ式に乗せると意味不明な値になるので分ける
       if (planetId === -1) return [FAKE_EPS, 23.44, 0, 0, 0, 0];
+      // 太陽だけ「動かす」設定のとき（既定は null＝素の格子のまま）
+      if (planetId === 0 && fake.sunMotionAnchorJd !== null) {
+        const rate = 360 / FAKE_TROPICAL_YEAR;
+        return [normalizeDegree((jd - fake.sunMotionAnchorJd) * rate), 0, 1, rate, 0, 0];
+      }
       const lon = normalizeDegree(planetId * 30 + fake.offset);
       // 金星（id 3）だけ逆行させておく
       const speed = planetId === 3 ? -0.5 : 1;
@@ -93,7 +123,22 @@ export function makeFakeEngine(): FakeEngine {
 
     swe_solcross_ut(targetLon: number, startJd: number, flags: number): number {
       fake.crossCalls.push({ kind: "sun", targetLon, startJd, flags });
+      if (fake.sunMotionAnchorJd !== null) {
+        // 太陽がその黄経に居る瞬間の格子（1 年ごと）から、startJd の直後のもの
+        const anchor =
+          fake.sunMotionAnchorJd + (normalizeDegree(targetLon) / 360) * FAKE_TROPICAL_YEAR;
+        return nextCrossing(startJd, anchor, FAKE_TROPICAL_YEAR);
+      }
       return nextCrossing(startJd, fake.sunAnchorJd, fake.sunPeriod);
+    },
+
+    swe_set_sid_mode(sidMode: number, t0: number, ayanT0: number): void {
+      fake.sidModeCalls.push({ sidMode, t0, ayanT0 });
+    },
+
+    // jd に依らず同じ値（本物は 50″/年ほど動くが、偽エンジンで時間を持たせる必要は無い）
+    swe_get_ayanamsa_ut(_jd: number): number {
+      return fake.ayanamsa;
     },
   };
 
