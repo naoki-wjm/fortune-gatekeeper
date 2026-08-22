@@ -16,6 +16,12 @@ import {
   formatCastResult,
   type CastOptions,
 } from "./iching";
+import {
+  DiceError,
+  MAX_DICE_COUNT,
+  formatAstroDiceText,
+  rollAstroDice,
+} from "./astro-dice";
 
 /** serverInfo.name。占星術層（astro-mcp.ts）も同じ名前を名乗る */
 export const SERVER_NAME = "fortune-gatekeeper";
@@ -35,7 +41,9 @@ const SERVER_INSTRUCTIONS =
   "空オラクルは創作のお題出しにも使われ、題の形式は「カード名『メッセージ』」です。" +
   DECK_POLICY_NOTE +
   "カードのほかに易占（周易）も立てられます——cast_hexagram が六爻を乱数で出し、" +
-  "本卦・変爻・之卦・互卦を返します。卦辞・爻辞は載せていないので、そこもあなたの知識で読んでください。";
+  "本卦・変爻・之卦・互卦を返します。卦辞・爻辞は載せていないので、そこもあなたの知識で読んでください。" +
+  "アストロダイス（roll_astro_dice）も振れます——天体 × 星座 × ハウスの名前の組だけを返すので、" +
+  "意味はあなたの知識で。";
 
 /** 相手が名乗ってきたバージョンがこの中にあればそれに合わせる */
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -241,6 +249,30 @@ const TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "roll_astro_dice",
+    title: "アストロダイスを振る",
+    description:
+      "アストロダイス（天体・星座・ハウスの 12 面ダイス 3 個）を振る。" +
+      "返るのは「天体 × 星座 × ハウス」の名前と記号の組だけで、意味は載せない——" +
+      "よく知られた体系なので、読み解きはあなた自身の占星術の知識で行うこと。" +
+      "シャッフルと同じくサーバー側の乱数で決まる。" +
+      "自分で「振ったふり」をせず、必ずこのツールを呼ぶこと。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        count: {
+          type: "integer",
+          minimum: 1,
+          maximum: MAX_DICE_COUNT,
+          default: 1,
+          description: `何組振るか（既定 1・最大 ${MAX_DICE_COUNT}）。1 組 = 天体・星座・ハウスのダイス 3 個。`,
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -384,6 +416,28 @@ function runCastHexagram(rawArguments: unknown): ToolResult {
   };
 }
 
+/** roll_astro_dice の引数を検算する（型だけ見る。値の妥当性は rollAstroDice 側が見る） */
+function parseDiceCount(raw: unknown): number {
+  const args = (raw ?? {}) as Record<string, unknown>;
+
+  const count = args["count"];
+  if (count === undefined || count === null) return 1;
+  if (typeof count !== "number") {
+    throw new DiceError(
+      `count は 1 〜 ${MAX_DICE_COUNT} の整数にしてください: ${JSON.stringify(count)}`,
+    );
+  }
+  return count;
+}
+
+function runRollAstroDice(rawArguments: unknown): ToolResult {
+  const rolls = rollAstroDice(parseDiceCount(rawArguments));
+  return {
+    content: [{ type: "text", text: formatAstroDiceText(rolls) }],
+    structuredContent: { rolls },
+  };
+}
+
 /** カード層のツールごとの許可キー（ツール定義から自動で導く） */
 const CARD_ARGUMENT_KEYS = allowedArgumentKeys(TOOLS);
 
@@ -402,9 +456,15 @@ function callTool(name: unknown, rawArguments: unknown): ToolResult {
     if (name === "list_decks") return runListDecks();
     if (name === "draw_cards") return runDrawCards(rawArguments);
     if (name === "cast_hexagram") return runCastHexagram(rawArguments);
+    if (name === "roll_astro_dice") return runRollAstroDice(rawArguments);
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
-    if (error instanceof DrawError || error instanceof CastError || error instanceof ArgumentError) {
+    if (
+      error instanceof DrawError ||
+      error instanceof CastError ||
+      error instanceof DiceError ||
+      error instanceof ArgumentError
+    ) {
       return toolError(error.message);
     }
     return toolError(error instanceof Error ? error.message : String(error));

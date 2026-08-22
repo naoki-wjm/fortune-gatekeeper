@@ -272,7 +272,8 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
     expect(json.error.code).toBe(-32603);
   });
 
-  it("公開カード層は無傷（3 本のまま・鍵も要らない）", async () => {
+  // 2026-08-22 roll_astro_dice 追加で更新（カード層のツールが増えても占星術層は混ざらない）
+  it("公開カード層は無傷（カード層のツールだけ・鍵も要らない）", async () => {
     const { response, json } = await fetchMcp("/mcp", {
       jsonrpc: "2.0",
       id: 1,
@@ -283,6 +284,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
       "list_decks",
       "draw_cards",
       "cast_hexagram",
+      "roll_astro_dice",
     ]);
   });
 

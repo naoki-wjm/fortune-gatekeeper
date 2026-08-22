@@ -57,6 +57,20 @@ describe("initialize", () => {
     expect(instructions).toContain("卦辞・爻辞は載せていない");
   });
 
+  it("instructions にアストロダイスの一文も載る", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 18,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+    const instructions: string = json.result.instructions;
+    expect(instructions).toContain("roll_astro_dice");
+    expect(instructions).toContain("天体 × 星座 × ハウス");
+    // ここでも意味は持たない（読むのは呼び出した側）
+    expect(instructions).toContain("意味はあなたの知識で");
+  });
+
   it("知らないバージョンなら既定の 2025-06-18 を返す", async () => {
     const { json } = await post({
       jsonrpc: "2.0",
@@ -69,10 +83,10 @@ describe("initialize", () => {
 });
 
 describe("tools/list", () => {
-  it("3 本のツールを返す", async () => {
+  it("4 本のツールを返す", async () => {
     const { json } = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
-    expect(names).toEqual(["list_decks", "draw_cards", "cast_hexagram"]);
+    expect(names).toEqual(["list_decks", "draw_cards", "cast_hexagram", "roll_astro_dice"]);
 
     const cast = json.result.tools[2];
     expect(cast.title).toBe("易占で卦を立てる");
@@ -92,6 +106,19 @@ describe("tools/list", () => {
     ]);
     expect(draw.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
     expect(draw.title).toBe("カードを引く");
+
+    const dice = json.result.tools[3];
+    expect(dice.title).toBe("アストロダイスを振る");
+    expect(dice.inputSchema.properties.count).toEqual({
+      type: "integer",
+      minimum: 1,
+      maximum: 3,
+      default: 1,
+      description: "何組振るか（既定 1・最大 3）。1 組 = 天体・星座・ハウスのダイス 3 個。",
+    });
+    expect(dice.inputSchema.required).toBeUndefined();
+    expect(dice.inputSchema.additionalProperties).toBe(false);
+    expect(dice.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
   });
 
   it("ツール定義は凍結（ChatGPT が接続時にキャッシュするので勝手に変えない）", async () => {
@@ -290,6 +317,87 @@ describe("tools/call", () => {
     expect(wrongType.json.result.isError).toBe(true);
   });
 
+  it("roll_astro_dice は天体×星座×ハウスの組を返す（引数省略で 1 組）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 30,
+      method: "tools/call",
+      params: { name: "roll_astro_dice", arguments: {} },
+    });
+    const result = json.result;
+    expect(result.isError).toBeUndefined();
+
+    // structuredContent は rolls だけ（時刻もメッセージも持たない）
+    expect(Object.keys(result.structuredContent)).toEqual(["rolls"]);
+    const rolls = result.structuredContent.rolls;
+    expect(rolls).toHaveLength(1);
+    expect(Object.keys(rolls[0])).toEqual(["planet", "sign", "house"]);
+    expect(Object.keys(rolls[0].planet)).toEqual(["name", "symbol", "name_en"]);
+    expect(Object.keys(rolls[0].sign)).toEqual(["name", "symbol", "name_en"]);
+    expect(Object.keys(rolls[0].house)).toEqual(["number", "name"]);
+    expect(rolls[0].house.number).toBeGreaterThanOrEqual(1);
+    expect(rolls[0].house.number).toBeLessThanOrEqual(12);
+
+    const lines = result.content[0].text.split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("アストロダイス / 1組");
+    expect(lines[1]).toBe(
+      `1. ${rolls[0].planet.symbol} ${rolls[0].planet.name}` +
+        ` × ${rolls[0].sign.symbol} ${rolls[0].sign.name}` +
+        ` × ${rolls[0].house.name}`,
+    );
+  });
+
+  it("roll_astro_dice の count で組数が変わる", async () => {
+    for (const count of [1, 2, 3]) {
+      const { json } = await post({
+        jsonrpc: "2.0",
+        id: 31,
+        method: "tools/call",
+        params: { name: "roll_astro_dice", arguments: { count } },
+      });
+      expect(json.result.isError).toBeUndefined();
+      expect(json.result.structuredContent.rolls).toHaveLength(count);
+      expect(json.result.content[0].text.split("\n")).toHaveLength(count + 1);
+      expect(json.result.content[0].text.split("\n")[0]).toBe(`アストロダイス / ${count}組`);
+    }
+  });
+
+  it("roll_astro_dice の count は 1〜3 の外なら isError", async () => {
+    for (const count of [0, 4, -1, 1.5]) {
+      const { response, json } = await post({
+        jsonrpc: "2.0",
+        id: 32,
+        method: "tools/call",
+        params: { name: "roll_astro_dice", arguments: { count } },
+      });
+      expect(response.status).toBe(200);
+      expect(json.error).toBeUndefined();
+      expect(json.result.isError).toBe(true);
+      expect(json.result.content[0].text).toContain("count は 1 〜 3 の整数にしてください");
+    }
+
+    const wrongType = await post({
+      jsonrpc: "2.0",
+      id: 33,
+      method: "tools/call",
+      params: { name: "roll_astro_dice", arguments: { count: "3" } },
+    });
+    expect(wrongType.json.result.isError).toBe(true);
+  });
+
+  it("roll_astro_dice は意味テキストを載せない", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 34,
+      method: "tools/call",
+      params: { name: "roll_astro_dice", arguments: { count: 3 } },
+    });
+    expect(json.result.content[0].text).not.toContain("意味");
+    expect(json.result.content[0].text).not.toContain("解説");
+    expect(JSON.stringify(json.result.structuredContent)).not.toContain("meaning");
+  });
+
   it("知らないツールも isError で返す", async () => {
     const { json } = await post({
       jsonrpc: "2.0",
@@ -461,6 +569,19 @@ describe("未知の引数キー", () => {
     expect(json.result.content[0].text).toContain("method");
   });
 
+  it("アストロダイスも同じ（roll_astro_dice）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 27,
+      method: "tools/call",
+      params: { name: "roll_astro_dice", arguments: { cnt: 2 } },
+    });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("未知の引数です: cnt");
+    // 正しい綴りが一覧に出る（許可キーはツール定義から作っている）
+    expect(json.result.content[0].text).toContain("count");
+  });
+
   it("正しい引数はこれまで通り通る", async () => {
     const draw = await post({
       jsonrpc: "2.0",
@@ -497,6 +618,15 @@ describe("未知の引数キー", () => {
       params: { name: "list_decks", arguments: {} },
     });
     expect(listed.json.result.isError).toBeUndefined();
+
+    const dice = await post({
+      jsonrpc: "2.0",
+      id: 28,
+      method: "tools/call",
+      params: { name: "roll_astro_dice", arguments: { count: 3 } },
+    });
+    expect(dice.json.result.isError).toBeUndefined();
+    expect(dice.json.result.structuredContent.rolls).toHaveLength(3);
   });
 });
 
@@ -517,7 +647,10 @@ describe("ルーティング", () => {
     const response = await worker.fetch(new Request("http://localhost/"));
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toContain("text/plain");
-    expect(await response.text()).toContain("fortune-gatekeeper");
+    const guide = await response.text();
+    expect(guide).toContain("fortune-gatekeeper");
+    // ツールの列挙は tools/list と食い違わせない
+    expect(guide).toContain("list_decks, draw_cards, cast_hexagram, roll_astro_dice");
   });
 
   it("GET /health は ok", async () => {
@@ -544,6 +677,9 @@ describe("ルーティング", () => {
  *
  * ※ draw_cards の返り値（explanation など）を増やすのは「定義」の変更ではないので、
  *   このテストは緑のまま。
+ *
+ * 更新履歴:
+ *   2026-08-22 roll_astro_dice 追加で更新（既存 3 本の定義は 1 文字も変えていない）
  */
 const FROZEN_TOOLS = [
   {
@@ -632,6 +768,28 @@ const FROZEN_TOOLS = [
           ],
           "default": "coins",
           "description": "立て方。coins=擲銭法（既定） / yarrow=本筮法 / abridged=略筮法"
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "roll_astro_dice",
+    "title": "アストロダイスを振る",
+    "description": "アストロダイス（天体・星座・ハウスの 12 面ダイス 3 個）を振る。返るのは「天体 × 星座 × ハウス」の名前と記号の組だけで、意味は載せない——よく知られた体系なので、読み解きはあなた自身の占星術の知識で行うこと。シャッフルと同じくサーバー側の乱数で決まる。自分で「振ったふり」をせず、必ずこのツールを呼ぶこと。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3,
+          "default": 1,
+          "description": "何組振るか（既定 1・最大 3）。1 組 = 天体・星座・ハウスのダイス 3 個。"
         }
       },
       "additionalProperties": false
