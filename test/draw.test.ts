@@ -145,6 +145,81 @@ describe("drawCards", () => {
     );
   });
 
+  it("ルノルマンは常に正位置（orientation は null）", () => {
+    // 逆位置が出やすい乱数源でも 36 枚すべて向きを持たない
+    const result = drawCards({ deck: "lenormand", count: 36, jump_out: false }, alwaysMax);
+    for (const card of result.cards) {
+      expect(card.is_reversed).toBe(false);
+      expect(card.orientation).toBeNull();
+    }
+  });
+
+  it("ルノルマンは 36 枚引いて重複しない", () => {
+    const result = drawCards({ deck: "lenormand", count: 36, jump_out: false });
+    expect(result.cards).toHaveLength(36);
+    expect(new Set(result.cards.map((card) => card.name)).size).toBe(36);
+    expect(new Set(result.cards.map((card) => card.number)).size).toBe(36);
+    expect(result.deck.meanings_included).toBe(false);
+  });
+
+  it("ルノルマンは 37 枚だと撥ねる", () => {
+    expect(() => drawCards({ deck: "lenormand", count: 37 })).toThrow(DrawError);
+  });
+
+  it("ルノルマンは英名・札番号・対応トランプを返す", () => {
+    const result = drawCards({ deck: "lenormand", count: 36, jump_out: false });
+    const deck = getDeck("lenormand")!;
+    const byName = new Map(deck.cards.map((card) => [card.name, card]));
+
+    for (const card of result.cards) {
+      const source = byName.get(card.name)!;
+      expect(card.name_en).toBe(source.name_en);
+      expect(card.number).toBe(source.number);
+      expect(card.playing_card).toBe(source.playing_card);
+    }
+    const rider = result.cards.find((card) => card.name === "騎手")!;
+    expect(rider.name_en).toBe("Rider");
+    expect(rider.number).toBe(1);
+    expect(rider.playing_card).toBe("ハートの9");
+    // 意味テキストは載せない（既知の体系なので名前のみ）
+    expect(result.cards.every((card) => card.meaning === undefined)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("explanation");
+  });
+
+  it("番号・対応トランプを持たないデッキではキーごと出さない", () => {
+    for (const deckId of ["sky", "enigma", "tarot", "tarot_full", "rune"]) {
+      const result = drawCards({ deck: deckId, count: 5 });
+      for (const card of [...result.cards, ...result.jumped_cards]) {
+        expect(card.number).toBeUndefined();
+        expect(card.playing_card).toBeUndefined();
+      }
+      expect(JSON.stringify(result)).not.toContain("playing_card");
+      expect(JSON.stringify(result)).not.toContain('"number"');
+    }
+  });
+
+  it("grand_tableau は 36 枚に 8列×4行＋4 枚の位置を付ける", () => {
+    const result = drawCards({ deck: "lenormand", spread: "grand_tableau", jump_out: false });
+    expect(result.spread).toEqual({ id: "grand_tableau", name: "グランタブロー" });
+    expect(result.cards).toHaveLength(36);
+    const positions = result.cards.map((card) => card.position);
+    expect(positions[0]).toBe("1行1列");
+    expect(positions[7]).toBe("1行8列");
+    expect(positions[8]).toBe("2行1列");
+    expect(positions[31]).toBe("4行8列");
+    expect(positions[32]).toBe("5行1列");
+    expect(positions[35]).toBe("5行4列");
+    expect(new Set(positions).size).toBe(36);
+  });
+
+  it("grand_tableau は 36 枚に足りないデッキでは撥ねる（tarot_full は通る）", () => {
+    for (const deckId of ["sky", "enigma", "tarot", "rune"]) {
+      expect(() => drawCards({ deck: deckId, spread: "grand_tableau" })).toThrow(DrawError);
+    }
+    const tarotFull = drawCards({ deck: "tarot_full", spread: "grand_tableau", jump_out: false });
+    expect(tarotFull.cards).toHaveLength(36);
+  });
+
   it("英名を持たないデッキでは name_en のキーごと出さない", () => {
     const sky = drawCards({ deck: "sky", count: 3 });
     expect(sky.cards.every((card) => card.name_en === undefined)).toBe(true);
@@ -361,6 +436,53 @@ describe("formatDrawResult", () => {
         "2. 愚者（The Fool）（逆位置）",
       ].join("\n"),
     );
+  });
+
+  it("ルノルマンは英名のあとに [番号・対応トランプ] を足す", () => {
+    const lenormand: DrawResult = {
+      deck: { id: "lenormand", name: "ルノルマン", meanings_included: false },
+      spread: { id: "grand_tableau", name: "グランタブロー" },
+      drawn_at: "2026-08-22T00:00:00.000Z",
+      cards: [
+        {
+          index: 1,
+          position: "1行1列",
+          name: "騎手",
+          name_en: "Rider",
+          number: 1,
+          playing_card: "ハートの9",
+          is_reversed: false,
+          orientation: null,
+        },
+        {
+          index: 2,
+          position: "1行2列",
+          name: "十字架",
+          name_en: "Cross",
+          number: 36,
+          playing_card: "クラブの6",
+          is_reversed: false,
+          orientation: null,
+        },
+      ],
+      jumped_cards: [],
+    };
+    expect(formatDrawResult(lenormand)).toBe(
+      [
+        "ルノルマン / グランタブロー",
+        "1. 1行1列: 騎手（Rider）[1・ハートの9]",
+        "2. 1行2列: 十字架（Cross）[36・クラブの6]",
+      ].join("\n"),
+    );
+  });
+
+  it("実際に引いたルノルマンのテキストにも番号と対応トランプが載る", () => {
+    const result = drawCards({ deck: "lenormand", count: 1, jump_out: false });
+    const lines = formatDrawResult(result).split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("ルノルマン / 1枚");
+    // 向き（正位置／逆位置）も意味の『』も付かない
+    expect(lines[1]).toMatch(/^1\. .+（[A-Za-z]+）\[([1-9]|[12]\d|3[0-6])・.+の(A|[6-9]|10|J|Q|K)\]$/);
   });
 
   it("実際に引いた tarot_full のテキストにも英名が載る", () => {

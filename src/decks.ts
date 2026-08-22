@@ -5,14 +5,20 @@
  * 合成したもの（手で編集しない）。
  * 意味テキストを載せてよいデッキと、カード名だけのデッキがある ―― 権利の都合で、
  * タロットとルーンは意味テキストを剥がしてある。読むのは Claude 自身の知識。
+ *
+ * 例外: data/lenormand.json だけは fortune-site に元が無いので**手書き**（同期スクリプトは
+ * 自分の5ファイルしか書かないので、npm run sync:decks を回しても消えない）。
+ * ルノルマンも既知の体系なのでカード名だけ——番号と対応トランプは名前と同じ「札の identity」
+ * として載せている（意味テキストではない）。
  */
 import skyOracle from "./data/sky-oracle.json";
 import enigmaOracle from "./data/enigma-oracle.json";
 import tarotMajor from "./data/tarot-major.json";
 import tarotMinor from "./data/tarot-minor.json";
 import runeFuthark from "./data/rune-futhark.json";
+import lenormand from "./data/lenormand.json";
 
-export type DeckId = "sky" | "enigma" | "tarot" | "tarot_full" | "rune";
+export type DeckId = "sky" | "enigma" | "tarot" | "tarot_full" | "rune" | "lenormand";
 
 /** JSON 側のカード1枚。デッキごとに持つキーが違う（統一スキーマではない） */
 export interface RawCard {
@@ -21,6 +27,10 @@ export interface RawCard {
   name_en?: string;
   /** ルーンだけ、カード個別に正逆の有無を持つ（デッキ既定より優先） */
   has_reversed?: boolean;
+  /** ルノルマンだけ持つ札番号（1〜36）。意味テキストではないので公開版にも残る */
+  number?: number;
+  /** ルノルマンだけ持つ対応トランプ（例「ハートの9」）。これも意味テキストではない */
+  playing_card?: string;
   keyword?: string;
   /** 正逆の無いカード用の意味 */
   meaning?: string;
@@ -57,6 +67,7 @@ const MEANINGS_INCLUDED: Record<DeckId, boolean> = {
   tarot: false,
   tarot_full: false,
   rune: false,
+  lenormand: false,
 };
 
 function toDeck(raw: unknown): Deck {
@@ -90,6 +101,7 @@ export const DECKS: readonly Deck[] = [
   toDeck(tarotMajor),
   buildTarotFull(),
   toDeck(runeFuthark),
+  toDeck(lenormand),
 ];
 
 export const DECK_IDS: DeckId[] = DECKS.map((deck) => deck.id);

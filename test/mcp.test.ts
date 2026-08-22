@@ -103,6 +103,16 @@ describe("tools/list", () => {
       "tarot",
       "tarot_full",
       "rune",
+      "lenormand",
+    ]);
+    expect(draw.inputSchema.properties.spread.enum).toEqual([
+      "single",
+      "two",
+      "three",
+      "hexagram",
+      "celtic",
+      "horoscope",
+      "grand_tableau",
     ]);
     expect(draw.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
     expect(draw.title).toBe("カードを引く");
@@ -136,8 +146,8 @@ describe("tools/call", () => {
       params: { name: "list_decks", arguments: {} },
     });
     expect(json.result.isError).toBeUndefined();
-    expect(json.result.structuredContent.decks).toHaveLength(5);
-    expect(json.result.structuredContent.spreads).toHaveLength(6);
+    expect(json.result.structuredContent.decks).toHaveLength(6);
+    expect(json.result.structuredContent.spreads).toHaveLength(7);
     expect(json.result.content[0].text).toContain("空オラクル");
     // 案内文だけ「解説あり」を名乗る（structuredContent の形は変えていない）
     expect(json.result.content[0].text).toContain("意味テキスト＋解説あり");
@@ -154,6 +164,104 @@ describe("tools/call", () => {
       "has_reversed",
       "meanings_included",
     ]);
+  });
+
+  it("list_decks にルノルマンとグランタブローが載る", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 29,
+      method: "tools/call",
+      params: { name: "list_decks", arguments: {} },
+    });
+    const decks = json.result.structuredContent.decks as {
+      id: string;
+      name: string;
+      card_count: number;
+      has_reversed: boolean | string;
+      meanings_included: boolean;
+    }[];
+    expect(decks.map((deck) => deck.id)).toEqual([
+      "sky",
+      "enigma",
+      "tarot",
+      "tarot_full",
+      "rune",
+      "lenormand",
+    ]);
+    expect(decks[5]).toEqual({
+      id: "lenormand",
+      name: "ルノルマン",
+      card_count: 36,
+      has_reversed: false,
+      meanings_included: false,
+    });
+
+    const spreads = json.result.structuredContent.spreads as {
+      id: string;
+      count: number;
+      positions: string[];
+    }[];
+    const grandTableau = spreads.find((spread) => spread.id === "grand_tableau")!;
+    expect(grandTableau.count).toBe(36);
+    expect(grandTableau.positions).toHaveLength(36);
+    expect(grandTableau.positions[0]).toBe("1行1列");
+    expect(grandTableau.positions[35]).toBe("5行4列");
+
+    const text: string = json.result.content[0].text;
+    expect(text).toContain("- lenormand: ルノルマン / 36枚 / 正逆なし / 意味テキストなし（カード名のみ）");
+    // 名前のみの線引きはルノルマンにも及ぶ（案内文の末尾）
+    expect(text).toContain("ルノルマンも既知の体系なのでカード名のみ（札番号と対応トランプは添える）。");
+  });
+
+  it("draw_cards（lenormand / grand_tableau）は 36 枚に位置と番号を付けて返す", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 30,
+      method: "tools/call",
+      params: {
+        name: "draw_cards",
+        arguments: { deck: "lenormand", spread: "grand_tableau", jump_out: false },
+      },
+    });
+    expect(json.result.isError).toBeUndefined();
+    const structured = json.result.structuredContent;
+    expect(structured.deck).toEqual({
+      id: "lenormand",
+      name: "ルノルマン",
+      meanings_included: false,
+    });
+    expect(structured.spread).toEqual({ id: "grand_tableau", name: "グランタブロー" });
+
+    const cards = structured.cards as {
+      position: string;
+      name: string;
+      name_en: string;
+      number: number;
+      playing_card: string;
+      orientation: string | null;
+    }[];
+    expect(cards).toHaveLength(36);
+    expect(new Set(cards.map((card) => card.number)).size).toBe(36);
+    expect(cards.map((card) => card.position)).toContain("5行4列");
+    expect(cards.every((card) => card.orientation === null)).toBe(true);
+    expect(cards.every((card) => typeof card.playing_card === "string")).toBe(true);
+
+    const lines: string[] = json.result.content[0].text.split("\n");
+    expect(lines).toHaveLength(37);
+    expect(lines[0]).toBe("ルノルマン / グランタブロー");
+    expect(lines[1]).toMatch(/^1\. 1行1列: .+（[A-Za-z]+）\[\d+・.+\]$/);
+  });
+
+  it("draw_cards（sky / grand_tableau）は枚数不足で撥ねる", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 31,
+      method: "tools/call",
+      params: { name: "draw_cards", arguments: { deck: "sky", spread: "grand_tableau" } },
+    });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("空オラクルは16枚しかありません");
+    expect(json.result.content[0].text).toContain("36枚");
   });
 
   it("draw_cards（sky / three）は 3 枚に position を付けて返す", async () => {
@@ -680,12 +788,14 @@ describe("ルーティング", () => {
  *
  * 更新履歴:
  *   2026-08-22 roll_astro_dice 追加で更新（既存 3 本の定義は 1 文字も変えていない）
+ *   2026-08-22 lenormand 追加で更新（list_decks と draw_cards の description・deck の enum・
+ *              spread の enum と description。cast_hexagram / roll_astro_dice は無変更）
  */
 const FROZEN_TOOLS = [
   {
     "name": "list_decks",
     "title": "デッキとスプレッドの一覧",
-    "description": "引けるカードデッキ（空オラクル／エニグマオラクル／タロット大アルカナ／タロット78枚／ルーン）と、使えるスプレッド（並べ方）の一覧を返す。draw_cards を呼ぶ前に、どのデッキが意味テキストを持っているか・どのスプレッドが何枚引くかを確かめたいときに使う。",
+    "description": "引けるカードデッキ（空オラクル／エニグマオラクル／タロット大アルカナ／タロット78枚／ルーン／ルノルマン）と、使えるスプレッド（並べ方）の一覧を返す。draw_cards を呼ぶ前に、どのデッキが意味テキストを持っているか・どのスプレッドが何枚引くかを確かめたいときに使う。",
     "inputSchema": {
       "type": "object",
       "properties": {},
@@ -699,7 +809,7 @@ const FROZEN_TOOLS = [
   {
     "name": "draw_cards",
     "title": "カードを引く",
-    "description": "カードを実際に引く（シャッフル・正逆・飛び出しはすべてサーバー側の乱数で決まる）。このツールは解釈をしない——引いた結果を返すだけなので、読み解きは呼び出した側で行うこと。\nデッキ: sky=空オラクル（16枚・正逆なし・意味テキストあり）、enigma=エニグマオラクル（32枚・正逆あり・意味テキストあり）、tarot=タロット大アルカナ（22枚・正逆あり・意味テキストなし）、tarot_full=タロット78枚（大アルカナ22＋小アルカナ56・正逆あり・意味テキストなし）、rune=ルーン エルダーフサルク（25枚・正逆はカードによる・意味テキストなし）。\nsky と enigma はこのサーバーの作者の自作オラクルデッキ（学習データに無い）なので一言＋解説を同梱、tarot と tarot_full と rune は広く知られた体系なのでカード名と正逆だけを返す——その3つは自分の知識で読むこと。\n空オラクルは小説のこぼれ話のお題出し係も兼ねていて、題の形式は「カード名『メッセージ』」。創作のお題として使うときはこの形を崩さないこと。\nspread を指定すると枚数はスプレッドに合わせて固定され、各札に位置（過去・現在・未来など）が付く。count と両方指定した場合は spread が優先される。「飛び出しカード」はシャッフル中に落ちた札の再現で、低い確率で 0〜3 枚付く（本引きとは別枠）。",
+    "description": "カードを実際に引く（シャッフル・正逆・飛び出しはすべてサーバー側の乱数で決まる）。このツールは解釈をしない——引いた結果を返すだけなので、読み解きは呼び出した側で行うこと。\nデッキ: sky=空オラクル（16枚・正逆なし・意味テキストあり）、enigma=エニグマオラクル（32枚・正逆あり・意味テキストあり）、tarot=タロット大アルカナ（22枚・正逆あり・意味テキストなし）、tarot_full=タロット78枚（大アルカナ22＋小アルカナ56・正逆あり・意味テキストなし）、rune=ルーン エルダーフサルク（25枚・正逆はカードによる・意味テキストなし）、lenormand=ルノルマン（36枚・正逆なし・意味テキストなし）。\nsky と enigma はこのサーバーの作者の自作オラクルデッキ（学習データに無い）なので一言＋解説を同梱、tarot と tarot_full と rune は広く知られた体系なのでカード名と正逆だけを返す——その3つは自分の知識で読むこと。\nlenormand も同じ理由でカード名だけ（札番号と対応トランプは添える）——これも自分の知識で読むこと。\n空オラクルは小説のこぼれ話のお題出し係も兼ねていて、題の形式は「カード名『メッセージ』」。創作のお題として使うときはこの形を崩さないこと。\nspread を指定すると枚数はスプレッドに合わせて固定され、各札に位置（過去・現在・未来など）が付く。count と両方指定した場合は spread が優先される。「飛び出しカード」はシャッフル中に落ちた札の再現で、低い確率で 0〜3 枚付く（本引きとは別枠）。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -710,9 +820,10 @@ const FROZEN_TOOLS = [
             "enigma",
             "tarot",
             "tarot_full",
-            "rune"
+            "rune",
+            "lenormand"
           ],
-          "description": "引くデッキ。sky / enigma / tarot（大アルカナ22枚） / tarot_full（78枚） / rune"
+          "description": "引くデッキ。sky / enigma / tarot（大アルカナ22枚） / tarot_full（78枚） / rune / lenormand（36枚）"
         },
         "count": {
           "type": "integer",
@@ -727,9 +838,10 @@ const FROZEN_TOOLS = [
             "three",
             "hexagram",
             "celtic",
-            "horoscope"
+            "horoscope",
+            "grand_tableau"
           ],
-          "description": "並べ方。single=1枚引き / two=2枚引き（Yes-No） / three=3枚引き（過去・現在・未来） / hexagram=ヘキサグラム（6枚） / celtic=ケルト十字（10枚） / horoscope=ホロスコープ（12枚）"
+          "description": "並べ方。single=1枚引き / two=2枚引き（Yes-No） / three=3枚引き（過去・現在・未来） / hexagram=ヘキサグラム（6枚） / celtic=ケルト十字（10枚） / horoscope=ホロスコープ（12枚） / grand_tableau=グランタブロー（36枚・8列×4行＋5行目に4枚。ルノルマンの全展開）"
         },
         "allow_reversed": {
           "type": "boolean",

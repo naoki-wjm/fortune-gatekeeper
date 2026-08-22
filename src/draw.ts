@@ -29,14 +29,18 @@ export interface DrawnCard {
   /** スプレッド指定時のみ。置き場所の名前 */
   position?: string;
   name: string;
-  /** 英名。持っているのはタロット系だけなので、無いデッキでは省略される */
+  /** 英名。持っているのはタロット系とルノルマンだけなので、無いデッキでは省略される */
   name_en?: string;
+  /** 札番号。持っているのはルノルマン（1〜36）だけ */
+  number?: number;
+  /** 対応トランプ（例「ハートの9」）。これもルノルマンだけ */
+  playing_card?: string;
   is_reversed: boolean;
   /** 正逆の概念が無いカードは null */
   orientation: Orientation | null;
   /** 意味テキストを持たないデッキでは省略される */
   meaning?: string;
-  /** 一言より長い解説。解説を持たないデッキ（タロット・ルーン）では省略される */
+  /** 一言より長い解説。解説を持たないデッキ（タロット・ルーン・ルノルマン）では省略される */
   explanation?: string;
 }
 
@@ -106,6 +110,9 @@ function materialize(
     orientation,
   };
   if (card.name_en !== undefined) drawn.name_en = card.name_en;
+  // 番号と対応トランプはルノルマンだけが持つ（持たないデッキではキーごと出さない）
+  if (card.number !== undefined) drawn.number = card.number;
+  if (card.playing_card !== undefined) drawn.playing_card = card.playing_card;
   if (position !== undefined) drawn.position = position;
 
   const meaning = pickMeaning(card, isReversed);
@@ -183,16 +190,30 @@ export function drawCards(options: DrawOptions, random: RandomSource = cryptoRan
 }
 
 /**
+ * 札の素性（番号・対応トランプ）の角括弧。持っているのはルノルマンだけなので、
+ * 無い札では空になる。例: [1・ハートの9]
+ */
+function identityTag(card: DrawnCard): string {
+  const parts: string[] = [];
+  if (card.number !== undefined) parts.push(String(card.number));
+  if (card.playing_card !== undefined) parts.push(card.playing_card);
+  return parts.length > 0 ? `[${parts.join("・")}]` : "";
+}
+
+/**
  * 1枚分の表記。例: サラマンダー（逆位置）『熱くなりすぎていませんか』
- * 英名を持つ札（タロット系）はカード名のあとに括弧で併記する。
+ * 英名を持つ札（タロット系・ルノルマン）はカード名のあとに括弧で併記する。
  * 例: ワンドのエース（Ace of Wands）（正位置）
+ * ルノルマンはさらに番号と対応トランプを角括弧で足す。例: 騎手（Rider）[1・ハートの9]
+ * （どちらも札の素性なので、向き・意味より先に置く）
  */
 function formatCard(card: DrawnCard): string {
   const english = card.name_en ? `（${card.name_en}）` : "";
+  const identity = identityTag(card);
   const direction =
     card.orientation === null ? "" : card.orientation === "reversed" ? "（逆位置）" : "（正位置）";
   const meaning = card.meaning ? `『${card.meaning}』` : "";
-  return `${card.name}${english}${direction}${meaning}`;
+  return `${card.name}${english}${identity}${direction}${meaning}`;
 }
 
 /** 解説の行（札の行の直下にぶら下げる）。解説を持たない札では空 */

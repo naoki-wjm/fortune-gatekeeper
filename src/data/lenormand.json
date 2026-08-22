@@ -1,0 +1,223 @@
+{
+  "id": "lenormand",
+  "name": "ルノルマン",
+  "has_reversed": false,
+  "cards": [
+    {
+      "name": "騎手",
+      "name_en": "Rider",
+      "number": 1,
+      "playing_card": "ハートの9"
+    },
+    {
+      "name": "クローバー",
+      "name_en": "Clover",
+      "number": 2,
+      "playing_card": "ダイヤの6"
+    },
+    {
+      "name": "船",
+      "name_en": "Ship",
+      "number": 3,
+      "playing_card": "スペードの10"
+    },
+    {
+      "name": "家",
+      "name_en": "House",
+      "number": 4,
+      "playing_card": "ハートのK"
+    },
+    {
+      "name": "樹",
+      "name_en": "Tree",
+      "number": 5,
+      "playing_card": "ハートの7"
+    },
+    {
+      "name": "雲",
+      "name_en": "Clouds",
+      "number": 6,
+      "playing_card": "クラブのK"
+    },
+    {
+      "name": "蛇",
+      "name_en": "Snake",
+      "number": 7,
+      "playing_card": "クラブのQ"
+    },
+    {
+      "name": "棺",
+      "name_en": "Coffin",
+      "number": 8,
+      "playing_card": "ダイヤの9"
+    },
+    {
+      "name": "花束",
+      "name_en": "Bouquet",
+      "number": 9,
+      "playing_card": "スペードのQ"
+    },
+    {
+      "name": "鎌",
+      "name_en": "Scythe",
+      "number": 10,
+      "playing_card": "ダイヤのJ"
+    },
+    {
+      "name": "鞭",
+      "name_en": "Whip",
+      "number": 11,
+      "playing_card": "クラブのJ"
+    },
+    {
+      "name": "鳥",
+      "name_en": "Birds",
+      "number": 12,
+      "playing_card": "ダイヤの7"
+    },
+    {
+      "name": "子供",
+      "name_en": "Child",
+      "number": 13,
+      "playing_card": "スペードのJ"
+    },
+    {
+      "name": "狐",
+      "name_en": "Fox",
+      "number": 14,
+      "playing_card": "クラブの9"
+    },
+    {
+      "name": "熊",
+      "name_en": "Bear",
+      "number": 15,
+      "playing_card": "クラブの10"
+    },
+    {
+      "name": "星",
+      "name_en": "Stars",
+      "number": 16,
+      "playing_card": "ハートの6"
+    },
+    {
+      "name": "コウノトリ",
+      "name_en": "Stork",
+      "number": 17,
+      "playing_card": "ハートのQ"
+    },
+    {
+      "name": "犬",
+      "name_en": "Dog",
+      "number": 18,
+      "playing_card": "ハートの10"
+    },
+    {
+      "name": "塔",
+      "name_en": "Tower",
+      "number": 19,
+      "playing_card": "スペードの6"
+    },
+    {
+      "name": "庭園",
+      "name_en": "Garden",
+      "number": 20,
+      "playing_card": "スペードの8"
+    },
+    {
+      "name": "山",
+      "name_en": "Mountain",
+      "number": 21,
+      "playing_card": "クラブの8"
+    },
+    {
+      "name": "道",
+      "name_en": "Crossroads",
+      "number": 22,
+      "playing_card": "ダイヤのQ"
+    },
+    {
+      "name": "ネズミ",
+      "name_en": "Mice",
+      "number": 23,
+      "playing_card": "クラブの7"
+    },
+    {
+      "name": "ハート",
+      "name_en": "Heart",
+      "number": 24,
+      "playing_card": "ハートのJ"
+    },
+    {
+      "name": "指輪",
+      "name_en": "Ring",
+      "number": 25,
+      "playing_card": "クラブのA"
+    },
+    {
+      "name": "本",
+      "name_en": "Book",
+      "number": 26,
+      "playing_card": "ダイヤの10"
+    },
+    {
+      "name": "手紙",
+      "name_en": "Letter",
+      "number": 27,
+      "playing_card": "スペードの7"
+    },
+    {
+      "name": "紳士",
+      "name_en": "Man",
+      "number": 28,
+      "playing_card": "ハートのA"
+    },
+    {
+      "name": "婦人",
+      "name_en": "Woman",
+      "number": 29,
+      "playing_card": "スペードのA"
+    },
+    {
+      "name": "百合",
+      "name_en": "Lily",
+      "number": 30,
+      "playing_card": "スペードのK"
+    },
+    {
+      "name": "太陽",
+      "name_en": "Sun",
+      "number": 31,
+      "playing_card": "ダイヤのA"
+    },
+    {
+      "name": "月",
+      "name_en": "Moon",
+      "number": 32,
+      "playing_card": "ハートの8"
+    },
+    {
+      "name": "鍵",
+      "name_en": "Key",
+      "number": 33,
+      "playing_card": "ダイヤの8"
+    },
+    {
+      "name": "魚",
+      "name_en": "Fish",
+      "number": 34,
+      "playing_card": "ダイヤのK"
+    },
+    {
+      "name": "錨",
+      "name_en": "Anchor",
+      "number": 35,
+      "playing_card": "スペードの9"
+    },
+    {
+      "name": "十字架",
+      "name_en": "Cross",
+      "number": 36,
+      "playing_card": "クラブの6"
+    }
+  ]
+}

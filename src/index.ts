@@ -40,7 +40,7 @@ const GUIDE_TEXT = [
   "MCP エンドポイント: POST /mcp（JSON-RPC 2.0 / Streamable HTTP・ステートレス）",
   "ツール: list_decks, draw_cards, cast_hexagram, roll_astro_dice",
   "デッキ: sky（空オラクル） / enigma（エニグマオラクル） / tarot（タロット大アルカナ22枚） / " +
-    "tarot_full（タロット78枚） / rune（ルーン）",
+    "tarot_full（タロット78枚） / rune（ルーン） / lenormand（ルノルマン36枚）",
   "易の立て方: coins（擲銭法） / yarrow（本筮法） / abridged（略筮法）",
   "アストロダイス: 天体・星座・ハウスの12面ダイス3個（1〜3組・名前と記号のみ）",
   "",

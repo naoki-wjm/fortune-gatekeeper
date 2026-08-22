@@ -3,7 +3,14 @@
  * fortune-site の src/cards/spreads.js を TypeScript へ移植したもの。内容は同一。
  */
 
-export type SpreadId = "single" | "two" | "three" | "hexagram" | "celtic" | "horoscope";
+export type SpreadId =
+  | "single"
+  | "two"
+  | "three"
+  | "hexagram"
+  | "celtic"
+  | "horoscope"
+  | "grand_tableau";
 
 export interface Spread {
   id: SpreadId;
@@ -12,6 +19,24 @@ export interface Spread {
   count: number;
   /** 各札の置き場所の名前。cards[i].position になる */
   positions: string[];
+}
+
+/**
+ * グランタブロー（ルノルマン 36 枚の全展開）の置き場所。
+ * 8列×4行＝32 枚を並べ、余りの 4 枚を5行目に置く形（8-8-8-8-4）。
+ * 位置の名前は意味ではなく座標そのもの（「3行5列」）——盤面の読み方は呼び出した側の知識。
+ */
+function grandTableauPositions(): string[] {
+  const positions: string[] = [];
+  for (let row = 1; row <= 4; row++) {
+    for (let column = 1; column <= 8; column++) {
+      positions.push(`${row}行${column}列`);
+    }
+  }
+  for (let column = 1; column <= 4; column++) {
+    positions.push(`5行${column}列`);
+  }
+  return positions;
 }
 
 export const SPREADS: readonly Spread[] = [
@@ -59,6 +84,12 @@ export const SPREADS: readonly Spread[] = [
       "第11ハウス（友人・理想）",
       "第12ハウス（無意識・秘密）",
     ],
+  },
+  {
+    id: "grand_tableau",
+    name: "グランタブロー",
+    count: 36,
+    positions: grandTableauPositions(),
   },
 ];
 
