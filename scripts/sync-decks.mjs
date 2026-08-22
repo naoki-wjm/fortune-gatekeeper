@@ -142,8 +142,13 @@ function attachExplanations(deck, meanings, fileName) {
   }
 }
 
-async function main() {
-  await mkdir(OUTPUT_DIR, { recursive: true });
+/**
+ * 5デッキを組み立てて検証まで済ませる（ここではまだ 1 バイトも書かない）。
+ * 解説の突合で落ちるのは 3 デッキ目かもしれないので、**書くのは全部通ってから**。
+ * 途中で投げれば src/data/ は前回のまま＝新旧の混ざった生成物を残さない。
+ */
+async function buildDecks() {
+  const built = [];
 
   for (const [deckId, fileName] of Object.entries(DECK_FILES)) {
     const deck = await readJson(join(SOURCE_DIR, fileName));
@@ -168,13 +173,22 @@ async function main() {
     }
 
     const cards = deck.cards.map((card) => (includeMeanings ? card : stripMeanings(card)));
-    const output = { ...deck, cards };
+    const label = includeMeanings ? (explained ? "意味＋解説あり" : "意味あり") : "意味を剥がした";
 
+    built.push({ fileName, label, cards, output: { ...deck, cards } });
+  }
+
+  return built;
+}
+
+async function main() {
+  const built = await buildDecks();
+
+  await mkdir(OUTPUT_DIR, { recursive: true });
+  for (const { fileName, label, cards, output } of built) {
     const outputPath = join(OUTPUT_DIR, fileName);
     // 整形（2スペース）・末尾改行・BOMなし UTF-8・LF
     await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
-
-    const label = includeMeanings ? (explained ? "意味＋解説あり" : "意味あり") : "意味を剥がした";
     console.log(`  ${fileName}: ${cards.length}枚（${label}）`);
   }
 

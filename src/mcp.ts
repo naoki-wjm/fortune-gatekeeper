@@ -96,6 +96,47 @@ export function toolError(message: string): ToolResult {
   return { content: [{ type: "text", text: `エラー: ${message}` }], isError: true };
 }
 
+/** 引数の形が受け付けられなかったときのエラー（デッキにも易にも属さない、入口の門番） */
+export class ArgumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArgumentError";
+  }
+}
+
+/**
+ * ツール定義（inputSchema.properties）から「使ってよいキー」の表を作る。
+ *
+ * 許可リストを手で書き写すと定義とずれるので、**定義そのものから導く**。
+ * inputSchema には additionalProperties: false と書いてあるが、これを守らせる
+ * クライアントばかりではないので（`default_lat` の綴り違いが黙って無視されると、
+ * 指定したはずの「いつもの場所」が入っていない図が返る）、サーバー側でも見る。
+ */
+export function allowedArgumentKeys(
+  tools: readonly { name: string; inputSchema: { properties: object } }[],
+): Map<string, string[]> {
+  return new Map(tools.map((tool) => [tool.name, Object.keys(tool.inputSchema.properties)]));
+}
+
+/**
+ * 未知のキーが混ざっていれば言い分（メッセージ）を、無ければ null を返す。
+ * 投げる例外の種類は層ごとに違う（カード層は ArgumentError、占星術層は AstroError）ので、
+ * ここは文面だけ作る。arguments の形そのものの間違いは各層の検算器の持ち場。
+ */
+export function unknownArgumentMessage(allowed: readonly string[], raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  const strays = Object.keys(raw as Record<string, unknown>).filter(
+    (key) => !allowed.includes(key),
+  );
+  if (strays.length === 0) return null;
+
+  return allowed.length === 0
+    ? `未知の引数です: ${strays.join(", ")}（このツールは引数を取りません）`
+    : `未知の引数です: ${strays.join(", ")}（使えるのは ${allowed.join(" / ")}）`;
+}
+
 // ---------------------------------------------------------------------------
 // ツール定義
 // ---------------------------------------------------------------------------
@@ -343,14 +384,29 @@ function runCastHexagram(rawArguments: unknown): ToolResult {
   };
 }
 
+/** カード層のツールごとの許可キー（ツール定義から自動で導く） */
+const CARD_ARGUMENT_KEYS = allowedArgumentKeys(TOOLS);
+
+/** 綴り違い・余分なキーは黙って無視せず断る（知らないツール名は素通し＝下で名前を弾く） */
+function assertKnownArguments(name: unknown, rawArguments: unknown): void {
+  if (typeof name !== "string") return;
+  const allowed = CARD_ARGUMENT_KEYS.get(name);
+  if (allowed === undefined) return;
+  const message = unknownArgumentMessage(allowed, rawArguments);
+  if (message !== null) throw new ArgumentError(message);
+}
+
 function callTool(name: unknown, rawArguments: unknown): ToolResult {
   try {
+    assertKnownArguments(name, rawArguments);
     if (name === "list_decks") return runListDecks();
     if (name === "draw_cards") return runDrawCards(rawArguments);
     if (name === "cast_hexagram") return runCastHexagram(rawArguments);
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
-    if (error instanceof DrawError || error instanceof CastError) return toolError(error.message);
+    if (error instanceof DrawError || error instanceof CastError || error instanceof ArgumentError) {
+      return toolError(error.message);
+    }
     return toolError(error instanceof Error ? error.message : String(error));
   }
 }
@@ -374,17 +430,51 @@ export interface JsonRpcRequest {
   params: unknown;
 }
 
+/** リクエスト本文の上限（64 KiB）。JSON-RPC の 1 発は数 KB で足りる */
+const MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * 本文の UTF-8 バイト数。
+ * UTF-16 の文字数がバイト数を上回ることは無いので、文字数の時点で超えていれば数えるまでもない
+ * （巨大な本文をもう一度バイト列に写さないための近道）。
+ */
+function bodyByteLength(text: string): number {
+  if (text.length > MAX_BODY_BYTES) return text.length;
+  return new TextEncoder().encode(text).byteLength;
+}
+
+function bodyTooLarge(): Response {
+  return jsonRpcError(null, -32600, "リクエスト本文が大きすぎます（上限 64KB）", 413);
+}
+
 /**
  * POST の本文を JSON-RPC 2.0 の単発リクエストとして読む。
- * 読めなかった場合（壊れた JSON・バッチ・id 無し・通知）は、そのまま返すべき Response を返す。
+ * 読めなかった場合（大きすぎ・壊れた JSON・バッチ・id 無し・通知）は、そのまま返すべき Response を返す。
  * カード層と占星術層で同じ読み方をするための共通部分。
  */
 export async function readJsonRpcRequest(
   request: Request,
 ): Promise<{ ok: true; value: JsonRpcRequest } | { ok: false; response: Response }> {
+  // Content-Length で分かるぶんは**本文に触れる前に**断る
+  const declaredLength = Number(request.headers.get("Content-Length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
+    return { ok: false, response: bodyTooLarge() };
+  }
+
+  // chunked（Content-Length 無し）は読んでから測るしかない
+  let text: string;
+  try {
+    text = await request.text();
+  } catch {
+    return { ok: false, response: jsonRpcError(null, -32700, "JSON を解析できませんでした", 400) };
+  }
+  if (bodyByteLength(text) > MAX_BODY_BYTES) {
+    return { ok: false, response: bodyTooLarge() };
+  }
+
   let payload: unknown;
   try {
-    payload = await request.json();
+    payload = JSON.parse(text);
   } catch {
     return { ok: false, response: jsonRpcError(null, -32700, "JSON を解析できませんでした", 400) };
   }
@@ -403,6 +493,14 @@ export async function readJsonRpcRequest(
   }
 
   const message = payload as JsonRpcMessage;
+  // 版の名乗りは必須（省略も 1.0 も受けない）
+  if (message.jsonrpc !== "2.0") {
+    return {
+      ok: false,
+      response: jsonRpcError(null, -32600, 'jsonrpc は "2.0" を指定してください', 400),
+    };
+  }
+
   const method = message.method;
   if (typeof method !== "string") {
     return { ok: false, response: jsonRpcError(null, -32600, "method がありません", 400) };

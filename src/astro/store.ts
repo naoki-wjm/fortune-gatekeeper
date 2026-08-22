@@ -57,12 +57,15 @@ export interface AstroKv {
 }
 
 /** URL に載る鍵の形（これ以外は KV を引く前に弾く。鍵そのものはどこにも出さない） */
-const KEY_PATTERN = /^[A-Za-z0-9_-]{6,128}$/;
+const KEY_PATTERN = /^[A-Za-z0-9_-]{20,128}$/;
 
 /** chart_id に使う文字（0/o/1/l のような紛らわしい字は外す） */
 const CHART_ID_ALPHABET = "23456789abcdefghijkmnpqrstuvwxyz";
 const CHART_ID_LENGTH = 8;
 const CHART_ID_PATTERN = /^[a-z0-9]{4,16}$/;
+
+/** 空き ID を探す試行回数（これだけ引いて全部埋まっていたら諦める） */
+const MAX_ID_ATTEMPTS = 8;
 
 /** 新しい chart_id（サーバー側の乱数で引く。カード側と同じ random.ts を使う） */
 export function newChartId(random: RandomSource = cryptoRandom): string {
@@ -121,6 +124,32 @@ export async function putChart(
   chart: StoredChart,
 ): Promise<void> {
   await kv.put(chartKey(user, chartId), JSON.stringify(chart));
+}
+
+/**
+ * 空いている chart_id を引いて保存する（save_chart の入口はこちらを使う）。
+ *
+ * `newChartId` は 32 文字 8 桁＝約 1.1 兆通りなので衝突はまず起きないが、
+ * 起きたときに**他人の図でも自分の古い図でも黙って上書きしてしまう**のが困る。
+ * put の前に get で空きを確かめ、埋まっていたら引き直す。
+ * KV は結果整合なので「直前に書いた ID が見えない」ことは有り得るが、
+ * その窓は数秒で、同じ 8 桁を同じ数秒に引く確率と重なる目はまず無い。
+ */
+export async function createChart(
+  kv: AstroKv,
+  user: string,
+  chart: StoredChart,
+  random: RandomSource = cryptoRandom,
+): Promise<string> {
+  for (let attempt = 0; attempt < MAX_ID_ATTEMPTS; attempt++) {
+    const chartId = newChartId(random);
+    if ((await kv.get(chartKey(user, chartId))) !== null) continue;
+    await putChart(kv, user, chartId, chart);
+    return chartId;
+  }
+  throw new Error(
+    `chart_id を ${MAX_ID_ATTEMPTS} 回引いても空きが見つかりませんでした（時間をおいてもう一度お試しください）`,
+  );
 }
 
 export async function getChart(

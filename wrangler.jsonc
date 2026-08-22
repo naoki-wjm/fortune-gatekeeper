@@ -9,8 +9,13 @@
   "name": "fortune-gatekeeper",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
+  // Workers Logs は使うが、呼び出しごとの記録（リクエスト URL を含む）は残さない ―― 占星術層の鍵が
+  // URL に載っているため。自前の console 出力だけが残る（鍵はそこにも書かない）。2026-08-22、査読対応
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "logs": {
+      "invocation_logs": false
+    }
   },
   // CPU の上限（ms）。2026-08-21 に Workers Paid へ移行（Free の名目 10ms では yearly_overview の
   // 実測 15〜42ms が収まらない）。Paid の既定値と同じ 30 秒をここに明示しておく ―― 期間走査系の

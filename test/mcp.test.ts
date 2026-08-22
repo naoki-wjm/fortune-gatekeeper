@@ -338,6 +338,166 @@ describe("プロトコルの端っこ", () => {
     const noId = await post({ jsonrpc: "2.0", method: "tools/list" });
     expect(noId.json.error.code).toBe(-32600);
   });
+
+  it('jsonrpc の名乗りが "2.0" でなければ -32600・400', async () => {
+    for (const payload of [
+      { id: 1, method: "ping" }, // 省略
+      { jsonrpc: "1.0", id: 1, method: "ping" },
+      { jsonrpc: 2.0, id: 1, method: "ping" }, // 数値の 2.0 は文字列ではない
+    ]) {
+      const { response, json } = await post(payload);
+      expect(response.status).toBe(400);
+      expect(json.error.code).toBe(-32600);
+      expect(json.error.message).toContain("jsonrpc");
+    }
+  });
+
+  it("通知でも名乗りは要る（jsonrpc 無しは 202 にしない）", async () => {
+    const { response, json } = await post({ method: "notifications/initialized" });
+    expect(response.status).toBe(400);
+    expect(json.error.code).toBe(-32600);
+  });
+});
+
+describe("リクエスト本文の大きさ", () => {
+  const LIMIT = 64 * 1024;
+
+  /** 本文を 1 バイト単位で作る（全部 ASCII なので 1 文字 = 1 バイト） */
+  function bodyOfSize(bytes: number): string {
+    const base = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: { pad: "" } });
+    return JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "ping",
+      params: { pad: "x".repeat(bytes - base.length) },
+    });
+  }
+
+  async function postRaw(
+    body: string,
+    headers: Record<string, string>,
+  ): Promise<{ response: Response; json: any }> {
+    const response = await worker.fetch(
+      new Request(ENDPOINT, { method: "POST", headers, body }),
+    );
+    const text = await response.text();
+    return { response, json: text ? JSON.parse(text) : null };
+  }
+
+  it("上限ちょうど（64KiB）は通る", async () => {
+    const body = bodyOfSize(LIMIT);
+    expect(body.length).toBe(LIMIT);
+
+    const { response, json } = await postRaw(body, { "Content-Type": "application/json" });
+    expect(response.status).toBe(200);
+    expect(json.result).toEqual({});
+  });
+
+  it("Content-Length が上限超なら、本文を読まずに 413", async () => {
+    // ヘッダだけ大きく名乗る（本文は小さい）＝読んでいたら通ってしまう形
+    const { response, json } = await postRaw(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), {
+      "Content-Type": "application/json",
+      "Content-Length": String(LIMIT + 1),
+    });
+    expect(response.status).toBe(413);
+    expect(json.error.code).toBe(-32600);
+    expect(json.error.message).toContain("リクエスト本文が大きすぎます");
+  });
+
+  it("Content-Length が無くても（chunked）本体が超えていれば 413", async () => {
+    const { response, json } = await postRaw(bodyOfSize(LIMIT + 1), {
+      "Content-Type": "application/json",
+    });
+    expect(response.status).toBe(413);
+    expect(json.error.code).toBe(-32600);
+    expect(json.error.message).toContain("上限 64KB");
+  });
+
+  it("マルチバイトも文字数ではなくバイト数で見る", async () => {
+    // 「あ」は UTF-8 で 3 バイト。文字数では上限内でもバイト数では超える
+    const padded = "あ".repeat(30_000);
+    const { response } = await postRaw(
+      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: { pad: padded } }),
+      { "Content-Type": "application/json" },
+    );
+    expect(response.status).toBe(413);
+  });
+});
+
+describe("未知の引数キー", () => {
+  it("綴り違いを黙って無視しない（draw_cards）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 20,
+      method: "tools/call",
+      params: { name: "draw_cards", arguments: { deck: "sky", allow_reverse: false } },
+    });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("未知の引数です: allow_reverse");
+    // 正しい綴りが一覧に出る（許可キーはツール定義から作っている）
+    expect(json.result.content[0].text).toContain("allow_reversed");
+  });
+
+  it("引数を取らないツールでも断る（list_decks）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 21,
+      method: "tools/call",
+      params: { name: "list_decks", arguments: { deck: "sky" } },
+    });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("このツールは引数を取りません");
+  });
+
+  it("易占も同じ（cast_hexagram）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 22,
+      method: "tools/call",
+      params: { name: "cast_hexagram", arguments: { methods: "coins" } },
+    });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("未知の引数です: methods");
+    expect(json.result.content[0].text).toContain("method");
+  });
+
+  it("正しい引数はこれまで通り通る", async () => {
+    const draw = await post({
+      jsonrpc: "2.0",
+      id: 23,
+      method: "tools/call",
+      params: {
+        name: "draw_cards",
+        arguments: { deck: "sky", count: 2, allow_reversed: false, jump_out: false },
+      },
+    });
+    expect(draw.json.result.isError).toBeUndefined();
+    expect(draw.json.result.structuredContent.cards).toHaveLength(2);
+
+    const spread = await post({
+      jsonrpc: "2.0",
+      id: 24,
+      method: "tools/call",
+      params: { name: "draw_cards", arguments: { deck: "tarot", spread: "three" } },
+    });
+    expect(spread.json.result.isError).toBeUndefined();
+
+    const cast = await post({
+      jsonrpc: "2.0",
+      id: 25,
+      method: "tools/call",
+      params: { name: "cast_hexagram", arguments: { method: "yarrow" } },
+    });
+    expect(cast.json.result.isError).toBeUndefined();
+
+    const listed = await post({
+      jsonrpc: "2.0",
+      id: 26,
+      method: "tools/call",
+      params: { name: "list_decks", arguments: {} },
+    });
+    expect(listed.json.result.isError).toBeUndefined();
+  });
 });
 
 describe("ルーティング", () => {

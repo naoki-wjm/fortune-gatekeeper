@@ -2,11 +2,17 @@ import { beforeEach, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
 import { normalizeDegree } from "../src/astro/chart";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
-import type { AuthContext } from "../src/astro/store";
+import {
+  createChart,
+  newChartId,
+  type AuthContext,
+  type StoredChart,
+} from "../src/astro/store";
+import type { RandomSource } from "../src/random";
 import { FakeKv } from "./stubs/fake-kv";
-import { makeFakeEngine, type FakeEngine } from "./stubs/fake-engine";
+import { FAKE_ASCMC, FAKE_CUSPS, makeFakeEngine, type FakeEngine } from "./stubs/fake-engine";
 
-const OWNER_KEY = "testkey123";
+const OWNER_KEY = "testkey1234567890abcd";
 const OWNER_RECORD = JSON.stringify({ user: "user1", name: "オーナー", role: "owner" });
 const OWNER: AuthContext = { user: "user1", name: "オーナー", role: "owner" };
 
@@ -29,7 +35,7 @@ beforeEach(() => {
 /** 占星術層に JSON-RPC を 1 発投げる（鍵の照合は済んでいる前提のハンドラ直叩き） */
 async function rpc(body: unknown, ctx: AstroContext = context): Promise<any> {
   const response = await handleAstroMcpRequest(
-    new Request("http://localhost/mcp/testkey123", {
+    new Request(`http://localhost/mcp/${OWNER_KEY}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1513,6 +1519,226 @@ describe("知らないツール", () => {
     const result = await call("reverse_horoscope", {});
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("知らないツールです");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 暦に無い日
+// ---------------------------------------------------------------------------
+
+/**
+ * 2026-02-31 のような日付は日の範囲（1〜31）を通り抜けてしまい、swe_julday はそれを
+ * 黙って 3 月 3 日へ繰り上げる ―― 打ち間違いが「別の日の図」として静かに返るのを防ぐ。
+ */
+describe("実在しない暦日", () => {
+  /** うるう年（4 で割り切れる / 400 で割り切れる） */
+  const VALID = [
+    { year: 2024, month: 2, day: 29 },
+    { year: 2000, month: 2, day: 29 },
+  ];
+  /** 平年の 2/29・無い日・100 で割り切れて 400 で割り切れない年の 2/29 */
+  const INVALID = [
+    { year: 2023, month: 2, day: 29 },
+    { year: 2026, month: 2, day: 30 },
+    { year: 2026, month: 4, day: 31 },
+    { year: 1900, month: 2, day: 29 },
+  ];
+
+  it("save_chart: うるう年は通り、暦に無い日は isError", async () => {
+    for (const date of VALID) {
+      const ok = await call("save_chart", { ...BIRTH, ...date });
+      expect(ok.isError).toBeUndefined();
+    }
+    for (const date of INVALID) {
+      const ng = await call("save_chart", { ...BIRTH, ...date });
+      expect(ng.isError).toBe(true);
+      expect(ng.content[0].text).toContain("は暦に存在しない日付です");
+      // 利用者が渡した値なので、どの日付が駄目だったかは言ってよい
+      expect(ng.content[0].text).toContain(String(date.year));
+    }
+  });
+
+  it("transit: 指定日が暦に無ければ isError（繰り上がった図を返さない）", async () => {
+    const chartId = await saveDefaultChart();
+
+    const ok = await call("transit", { chart_id: chartId, year: 2024, month: 2, day: 29 });
+    expect(ok.isError).toBeUndefined();
+    expect(ok.content[0].text).toContain("日時: 2024-02-29 00:00 UTC");
+
+    for (const date of INVALID) {
+      const ng = await call("transit", { chart_id: chartId, ...date });
+      expect(ng.isError).toBe(true);
+      expect(ng.content[0].text).toContain("は暦に存在しない日付です");
+    }
+  });
+
+  it("transit_events: start の日付も暦で検算する", async () => {
+    const chartId = await saveDefaultChart();
+
+    const ok = await call("transit_events", {
+      chart_id: chartId,
+      start: "2024-02-29",
+      days: 1,
+      bodies: "outer",
+    });
+    expect(ok.isError).toBeUndefined();
+
+    for (const date of INVALID) {
+      const start = `${date.year}-${String(date.month).padStart(2, "0")}-${date.day}`;
+      const ng = await call("transit_events", { chart_id: chartId, start, days: 1 });
+      expect(ng.isError).toBe(true);
+      expect(ng.content[0].text).toContain("は暦に存在しない日付です");
+    }
+  });
+
+  it("progressions: 対象日も暦で検算する", async () => {
+    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
+
+    const ok = await call("progressions", { year: 2024, month: 2, day: 29 }, owner);
+    expect(ok.isError).toBeUndefined();
+    expect(ok.content[0].text).toContain("対象日: 2024-02-29");
+
+    for (const date of INVALID) {
+      const ng = await call("progressions", date, owner);
+      expect(ng.isError).toBe(true);
+      expect(ng.content[0].text).toContain("は暦に存在しない日付です");
+    }
+  });
+
+  it("progressions: 原本（OWNER_NATAL）の日付が暦に無いときは、値を出さずに断る", async () => {
+    const ctx: AstroContext = {
+      ...context,
+      ownerNatal: JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), month: 2, day: 31 }),
+    };
+    const result = await call("progressions", {}, ctx);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("OWNER_NATAL の日付が暦に存在しません");
+    // 預かりものなので、日付そのものは書かない
+    expect(result.content[0].text).not.toContain("31");
+    expect(result.content[0].text).not.toContain("1990");
+  });
+
+  it("lunar_return / solar_return は日を取らない（月初 1 日固定なので暦の穴が無い）", async () => {
+    const chartId = await saveChartWithHome();
+
+    // 平年の 2 月でも「その月に入るリターン」は普通に引ける
+    const lunar = await call("lunar_return", { chart_id: chartId, year: 2023, month: 2 });
+    expect(lunar.isError).toBeUndefined();
+    expect(lunar.content[0].text).toContain("2023年2月");
+
+    const solar = await call("solar_return", { chart_id: chartId, year: 2023 });
+    expect(solar.isError).toBeUndefined();
+    expect(solar.content[0].text).toContain("2023年");
+
+    // day を渡そうとしても、そもそも受け付けない
+    const withDay = await call("solar_return", { chart_id: chartId, year: 2023, day: 31 });
+    expect(withDay.isError).toBe(true);
+    expect(withDay.content[0].text).toContain("未知の引数です: day");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 未知の引数キー
+// ---------------------------------------------------------------------------
+
+describe("未知の引数キー", () => {
+  it("綴り違いを黙って無視しない（default_latt は成功扱いにしない）", async () => {
+    const result = await call("save_chart", { ...BIRTH, default_latt: 34.7, default_lng: 135.5 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("未知の引数です: default_latt");
+    // 正しい綴りを言い添える（使えるキーの一覧はツール定義から作っている）
+    expect(result.content[0].text).toContain("default_lat");
+    // 保存もされていない
+    expect([...kv.store.keys()].filter((key) => key.startsWith("chart:"))).toHaveLength(0);
+  });
+
+  it("引数を取らないツールでも断る（list_charts）", async () => {
+    const result = await call("list_charts", { chart_id: "abcd1234" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("未知の引数です: chart_id");
+    expect(result.content[0].text).toContain("このツールは引数を取りません");
+  });
+
+  it("複数の余分なキーはまとめて挙げる", async () => {
+    const chartId = await saveDefaultChart();
+    const result = await call("transit", { chart_id: chartId, foo: 1, bar: 2 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("未知の引数です: foo, bar");
+  });
+
+  it("正しい引数はこれまで通り通る", async () => {
+    const chartId = await saveDefaultChart();
+    const transit = await call("transit", {
+      chart_id: chartId,
+      year: 2026,
+      month: 8,
+      day: 20,
+      hour: 11,
+      minute: 15,
+      utc_offset: 9,
+    });
+    expect(transit.isError).toBeUndefined();
+
+    const events = await call("transit_events", {
+      chart_id: chartId,
+      start: "2026-08-20",
+      days: 3,
+      bodies: "outer",
+      utc_offset: 9,
+    });
+    expect(events.isError).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// chart_id の発行
+// ---------------------------------------------------------------------------
+
+describe("chart_id の衝突回避", () => {
+  const SAMPLE: StoredChart = {
+    label: "衝突テスト",
+    house_system: "P",
+    planets: [{ id: 0, lon: 0, speed: 1 }],
+    cusps: [...FAKE_CUSPS],
+    ascmc: [...FAKE_ASCMC],
+    created: "2026-08-22T00:00:00.000Z",
+  };
+
+  /** 引く目を並べた乱数源（8 回で chart_id 1 本ぶん） */
+  function scriptedRandom(draws: readonly number[]): RandomSource {
+    const queue = [...draws];
+    return { int: () => queue.shift() ?? 0 };
+  }
+
+  it("埋まっている id は避けて引き直す（既存の図を上書きしない）", async () => {
+    // 目 0 → "2"、目 1 → "3"（CHART_ID_ALPHABET の頭 2 文字）
+    const random = scriptedRandom([...Array(8).fill(0), ...Array(8).fill(1)]);
+    const taken = newChartId(scriptedRandom(Array(8).fill(0)));
+    kv.store.set(`chart:user1:${taken}`, JSON.stringify({ ...SAMPLE, label: "先客" }));
+
+    const chartId = await createChart(kv, "user1", SAMPLE, random);
+    expect(chartId).not.toBe(taken);
+    expect(chartId).toMatch(/^[a-z0-9]{8}$/);
+
+    // 先客は無傷、新しい図は新しい ID に入っている
+    expect(JSON.parse(kv.store.get(`chart:user1:${taken}`) as string).label).toBe("先客");
+    expect(JSON.parse(kv.store.get(`chart:user1:${chartId}`) as string).label).toBe("衝突テスト");
+  });
+
+  it("引き直しても空きが無ければ例外（黙って上書きしない）", async () => {
+    const always = () => scriptedRandom(Array(8).fill(0));
+    kv.store.set(`chart:user1:${newChartId(always())}`, JSON.stringify(SAMPLE));
+
+    await expect(createChart(kv, "user1", SAMPLE, always())).rejects.toThrow(
+      /空きが見つかりませんでした/,
+    );
+  });
+
+  it("同じ id が別の人の棚にあってもぶつからない（棚は user ごと）", async () => {
+    const draws = () => scriptedRandom(Array(8).fill(0));
+    const mine = await createChart(kv, "user1", SAMPLE, draws());
+    const theirs = await createChart(kv, "user2", SAMPLE, draws());
+    expect(theirs).toBe(mine);
   });
 });
 

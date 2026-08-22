@@ -12,11 +12,13 @@
 import {
   SERVER_NAME,
   SERVER_VERSION,
+  allowedArgumentKeys,
   jsonRpcError,
   jsonRpcResult,
   negotiateProtocolVersion,
   readJsonRpcRequest,
   toolError,
+  unknownArgumentMessage,
   type ToolResult,
 } from "../mcp";
 import {
@@ -65,11 +67,11 @@ import {
   type ReturnKind,
 } from "./returns";
 import {
+  createChart,
   deleteChart,
   getChart,
   listCharts,
   lookupKey,
-  newChartId,
   putChart,
   type AstroKv,
   type AuthContext,
@@ -716,6 +718,41 @@ function pad(value: number, width = 2): string {
   return String(value).padStart(width, "0");
 }
 
+/** 各月の日数（[0] は 1 月。2 月だけうるう年で伸びる） */
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** グレゴリオ暦のうるう年（4 で割り切れ、100 で割り切れない、または 400 で割り切れる） */
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+/** その月の日数（swe_julday はグレゴリオ暦固定＝GREGORIAN で呼んでいるので暦もそれに合わせる） */
+function daysInMonth(year: number, month: number): number {
+  if (month === 2 && isLeapYear(year)) return 29;
+  return DAYS_IN_MONTH[month - 1] as number;
+}
+
+/** その年月日が暦に実在するか（月は 1〜12 で検算済みという前提） */
+function isCalendarDay(year: number, month: number, day: number): boolean {
+  return day >= 1 && day <= daysInMonth(year, month);
+}
+
+/**
+ * 実在しない暦日を弾く。
+ *
+ * 日の範囲（1〜31）だけでは 2026-02-31 が通ってしまい、`swe_julday` はそれを黙って
+ * 3 月 3 日に繰り上げる ―― 打ち間違いが「別の日の図」として静かに返ってくるのが困る。
+ * ⚠ 呼ぶ相手を選ぶこと: **利用者が渡した引数**にだけ使う（メッセージに日付が出る）。
+ *    OWNER_NATAL のような預かりものは値を出さない言い方で断る（parseOwnerNatal 参照）。
+ */
+function assertCalendarDay(year: number, month: number, day: number): void {
+  if (isCalendarDay(year, month, day)) return;
+  throw new AstroError(
+    `${year}-${pad(month)}-${pad(day)} は暦に存在しない日付です` +
+      `（${year}年${month}月は${daysInMonth(year, month)}日まで）`,
+  );
+}
+
 /** UTC の Date を「2026-08-20 02:15 UTC」に */
 function formatUtcMoment(date: Date): string {
   return (
@@ -760,6 +797,7 @@ function parseStartDate(raw: string): { year: number; month: number; day: number
   if (month < 1 || month > 12 || day < 1 || day > 31) {
     throw new AstroError(`start の月日が暦の範囲を外れています（月は 1〜12、日は 1〜31）: ${raw}`);
   }
+  assertCalendarDay(year, month, day);
   return { year, month, day };
 }
 
@@ -874,6 +912,7 @@ async function runSaveChart(rawArguments: unknown, context: AstroContext): Promi
     minute: requireInteger(args, "minute", 0, 59),
     utcOffset: requireNumber(args, "utc_offset", -14, 14),
   };
+  assertCalendarDay(moment.year, moment.month, moment.day);
   const lat = requireNumber(args, "lat", -90, 90);
   const lng = requireNumber(args, "lng", -180, 180);
   const houseSystem = requireHouseSystem(args);
@@ -901,8 +940,8 @@ async function runSaveChart(rawArguments: unknown, context: AstroContext): Promi
     if (defaultLabel) stored.default_location.label = defaultLabel;
   }
 
-  const chartId = newChartId();
-  await putChart(context.kv, context.auth.user, chartId, stored);
+  // ID は空きを確かめてから発行する（衝突すると他人の図・自分の古い図を黙って上書きしてしまう）
+  const chartId = await createChart(context.kv, context.auth.user, stored);
 
   const angles = anglesOf(stored);
   const lines: string[] = [
@@ -1176,6 +1215,8 @@ async function runTransit(rawArguments: unknown, context: AstroContext): Promise
           "（hour・minute を省くと 0 時 0 分、utc_offset を省くと UTC 扱い）",
       );
     }
+    // Date も swe_julday も 2 月 31 日を黙って翌月へ繰り上げるので、その前に断る
+    assertCalendarDay(year, month, day);
     utcDate = utcDateFromLocal(year, month, day, hour ?? 0, minute ?? 0, utcOffset ?? 0);
   } else {
     utcDate = now;
@@ -1538,10 +1579,11 @@ function parseOwnerNatal(raw: string | undefined): OwnerNatal {
   const user = record["user"];
   if (typeof user !== "string" || user.length === 0) throw new AstroError(BROKEN_NATAL);
 
+  let natal: OwnerNatal;
   try {
     const houseSystem = optionalString(record, "house_system", 4) ?? "P";
     if (!HOUSE_SYSTEM_CODES.includes(houseSystem)) throw new AstroError(BROKEN_NATAL);
-    return {
+    natal = {
       user,
       moment: {
         year: requireInteger(record, "year", -5000, 5000),
@@ -1559,6 +1601,14 @@ function parseOwnerNatal(raw: string | undefined): OwnerNatal {
     // 検算器のメッセージ（「year は必須です」など）は原本の形を漏らすので、ここで丸める
     throw new AstroError(BROKEN_NATAL);
   }
+
+  // 暦に無い日（2 月 31 日など）も断るが、**日付そのものは書かない**（原本が漏れる）
+  if (!isCalendarDay(natal.moment.year, natal.moment.month, natal.moment.day)) {
+    throw new AstroError(
+      "OWNER_NATAL の日付が暦に存在しません（原本の年月日を確かめてください）。",
+    );
+  }
+  return natal;
 }
 
 async function runProgressions(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
@@ -1589,6 +1639,9 @@ async function runProgressions(rawArguments: unknown, context: AstroContext): Pr
     throw new AstroError(
       "year / month / day はそろえて指定してください（すべて省略すると今日で計算します）",
     );
+  }
+  if (given === 3) {
+    assertCalendarDay(year as number, month as number, day as number);
   }
 
   const now = context.now ? context.now() : new Date();
@@ -1990,12 +2043,25 @@ async function runTransitEvents(rawArguments: unknown, context: AstroContext): P
   };
 }
 
+/** 占星術層のツールごとの許可キー（ツール定義から自動で導く） */
+const ASTRO_ARGUMENT_KEYS = allowedArgumentKeys(ASTRO_TOOLS);
+
+/** 綴り違い・余分なキーは黙って無視せず断る（知らないツール名は素通し＝下で名前を弾く） */
+function assertKnownAstroArguments(name: unknown, rawArguments: unknown): void {
+  if (typeof name !== "string") return;
+  const allowed = ASTRO_ARGUMENT_KEYS.get(name);
+  if (allowed === undefined) return;
+  const message = unknownArgumentMessage(allowed, rawArguments);
+  if (message !== null) throw new AstroError(message);
+}
+
 async function callAstroTool(
   name: unknown,
   rawArguments: unknown,
   context: AstroContext,
 ): Promise<ToolResult> {
   try {
+    assertKnownAstroArguments(name, rawArguments);
     if (name === "save_chart") return await runSaveChart(rawArguments, context);
     if (name === "list_charts") return await runListCharts(context);
     if (name === "get_chart") return await runGetChart(rawArguments, context);

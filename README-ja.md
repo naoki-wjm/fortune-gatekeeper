@@ -116,7 +116,7 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 
 ### 鍵（URL キー方式）
 
-カード層と違って、こちらは誰の chart_id かを分ける必要があるので、URL の末尾に鍵を載せます。`POST /mcp/<鍵>` の鍵を KV の台帳（`key:<鍵>` → `{user, name, role}`）と突き合わせ、載っていなければ 401。**鍵そのものはレスポンスにもログにも出しません**（照合に失敗しても「確認できませんでした」としか言いません）。役どころは `owner` と `friend` の2つで、違いは `progressions` を使えるかどうかだけです。
+カード層と違って、こちらは誰の chart_id かを分ける必要があるので、URL の末尾に鍵を載せます。`POST /mcp/<鍵>` の鍵を KV の台帳（`key:<鍵>` → `{user, name, role}`）と突き合わせ、載っていなければ 401。**鍵そのものはレスポンスにもエラー文にも、自前のログにも出しません**（照合に失敗しても「確認できませんでした」としか言いません）。ただし鍵は URL に載っているので、**Cloudflare 側の呼び出し記録や `wrangler tail` にはリクエスト URL として映り得ます**。そのため `wrangler.jsonc` では Workers Logs の呼び出しごとの記録（`observability.logs.invocation_logs`）を切ってあり、`wrangler tail` の出力や MCP クライアントの設定画面など鍵つき URL が見える場所は、画面共有やログの貼り付けから外してください。URL 方式なのは、claude.ai と ChatGPT のコネクタが任意のヘッダを付けられないため（Authorization ヘッダ方式だと Web 側から繋げません）。役どころは `owner` と `friend` の2つで、違いは `progressions` を使えるかどうかだけです。
 
 ### ツール（11本）
 
@@ -155,7 +155,7 @@ npx wrangler kv namespace create ASTRO_KV
 #     "utc_offset":9,"lat":35.6895,"lng":139.6917,"house_system":"P"}
 npx wrangler secret put OWNER_NATAL
 
-# 3) 鍵を発行して台帳に載せる（鍵は推測されない長さで。URL に載るので [A-Za-z0-9_-] 6〜128 文字）
+# 3) 鍵を発行して台帳に載せる（鍵は推測されない長さで。URL に載るので [A-Za-z0-9_-] 20〜128 文字。README の生成例（32 文字）に従えば足ります）
 KEY=$(openssl rand -hex 16)
 npx wrangler kv key put --binding ASTRO_KV "key:$KEY" \
   '{"user":"owner","name":"オーナー","role":"owner"}' --remote
@@ -304,6 +304,6 @@ npm test
 
 ## ライセンス
 
-- **コード**: [GNU AGPL-3.0](LICENSE)。同梱している [Swiss Ephemeris](https://www.astro.com/swisseph/)（Astrodienst AG）が AGPL-3.0 とプロフェッショナルライセンスのデュアルライセンスであり、本プロジェクトは AGPL-3.0 側を選択しています。`src/astro/sweph/` の wasm ビルドと JS ラッパーは [sweph-wasm](https://github.com/ptprashanttripathi/sweph-wasm) 由来（無改造）、その元は [Swiss Ephemeris](https://github.com/aloistr/swisseph) です
+- **コード**: [GNU AGPL-3.0](LICENSE)。同梱している [Swiss Ephemeris](https://www.astro.com/swisseph/)（Astrodienst AG）が AGPL-3.0 とプロフェッショナルライセンスのデュアルライセンスであり、本プロジェクトは AGPL-3.0 側を選択しています。`src/astro/sweph/` の wasm ビルドと JS ラッパーは [sweph-wasm](https://github.com/ptprashanttripathi/sweph-wasm) 由来（無改造）、その元は [Swiss Ephemeris](https://github.com/aloistr/swisseph) です。**由来の固定**（2026-08-22 照合）: 3 点とも npm の [`sweph-wasm@2.6.9`](https://www.npmjs.com/package/sweph-wasm/v/2.6.9)（AGPL-3.0-or-later、2025-09-09 公開）の `dist/` と SHA-256 が一致します——`swisseph.wasm` = `dist/wasm/swisseph.wasm`（`b8edc953c490d073f542fce22a9d50df85169fbb2e5e6573ec064df9d0bf622d`）、`swisseph.js` = `dist/wasm/swisseph.js`（`622f30215961d447b028448caf105f78b34b490a0246eae522465bf99bff9a4a`）、`sweph-wasm.js` = `dist/index.js`（`69edbea97573aa8171f40728e08d30d7ddd0c25cf3bf2c903e10e76267f33825`）。組み込まれている Swiss Ephemeris は `swe_version()` の返り値で **2.10.03**。同じバイナリを得たいときは上記バージョンの npm パッケージから取り出してください（`sweph/wasm/swisseph.js` だけはこちらで書いた再エクスポートの薄皮で、複製ではありません）
 - **カードの文言・解説**（空オラクル・エニグマオラクルの `meaning` / `explanation`、`meanings/*.json`）: 作者（和条門尚樹）の著作物で、コードとは別に権利を保持します（単純併存＝mere aggregation であり AGPL の対象外）。デッキテキストの転載・再利用は別途ご相談ください
 - タロット・ルーンのカード名、六十四卦の卦名は古典・共有文化の範疇です

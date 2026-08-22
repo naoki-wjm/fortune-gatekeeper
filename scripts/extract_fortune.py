@@ -161,12 +161,14 @@ def dump(obj, path: Path) -> None:
         f.write("\n")
 
 
+print(f"辞書: {dic_path}")
+print("問題:", problems if problems else "なし")
+# 検証は書く前に。落ちた回の中途半端な JSON を meanings/ に残さない
+if problems:
+    sys.exit(1)
+
 OUT_DIR.mkdir(exist_ok=True)
 dump(out_enigma, OUT_DIR / "enigma_meanings.json")
 dump(out_sky, OUT_DIR / "sky_meanings.json")
 
-print(f"辞書: {dic_path}")
 print(f"エニグマ: {len(enigma)}枚 / 空: {len(sky)}枚 → {OUT_DIR}")
-print("問題:", problems if problems else "なし")
-if problems:
-    sys.exit(1)
