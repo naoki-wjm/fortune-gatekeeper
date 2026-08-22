@@ -4,7 +4,7 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 
 **引く（立てる・計算する）のはサーバー、読むのは Claude。** ここには解釈層がありません。シャッフルも正逆も飛び出しも、易の六爻もサーバー側の乱数（`crypto.getRandomValues`）で決めて、その結果だけを返します。LLM に引かせると「引いたふり」ができてしまうので、乱数だけは渡さない、という設計です。
 
-カード層と易占には守るべき API キーもコストも無いので、認証・アクセス制御を持ちません（誰が呼んでも同じ答えが返ります）。占星術層だけは「誰のチャートか」を分ける必要があるため、URL に鍵を載せます（後述）。
+カード層と易占には守るべき API キーもコストも無いので、認証・アクセス制御を持ちません（誰が呼んでも同じ答えが返ります）。占星術層だけは「誰のチャートか」を分ける必要があるため、入口を分けています——OAuth（Cloudflare Access で身元を確かめる `POST /astro/mcp`）と、URL に鍵を載せる従来の `POST /mcp/<鍵>` の2つが並走しています（後述）。
 
 **公開層には個人データの口を生やしません。** 乱数で引くだけの層（カード・易・アストロダイス・ジオマンシー）は何も預からないので公開のまま、**誕生日を使う占い（数秘術など）は鍵つきの占星術層だけ**に置いています。
 
@@ -153,7 +153,7 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 
 `structuredContent` は `mothers[4]` / `daughters[4]` / `nieces[4]` / `witnesses.right` / `witnesses.left` / `judge` / `reconciler`、各図形は `latin` / `name` / `lines`（上から頭・首・体・足、1 点か 2 点）/ `glyph`。裁判官の点の総和は必ず偶数になる（定理）ので、それをテストで固定しています。
 
-## 占星術層（`POST /mcp/<鍵>`・招かれた人だけ）
+## 占星術層（`POST /astro/mcp` と `POST /mcp/<鍵>`・招かれた人だけ）
 
 カード層とは別の入口で、ホロスコープ（西洋占星術）の天体計算をします。**計算するのはサーバー、読むのは Claude。** 返るのは天体の黄経・ハウス・アスペクトといった座標と角度だけで、「射手座の人は〜」のたぐいの解釈は一切持ちません。エンジンは Swiss Ephemeris の wasm（Moshier モード＝天文暦ファイル不要）で、`src/astro/engine.ts` が唯一の窓口です。
 
@@ -172,6 +172,93 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 ### 鍵（URL キー方式）
 
 カード層と違って、こちらは誰の chart_id かを分ける必要があるので、URL の末尾に鍵を載せます。`POST /mcp/<鍵>` の鍵を KV の台帳（`key:<鍵>` → `{user, name, role}`）と突き合わせ、載っていなければ 401。**鍵そのものはレスポンスにもエラー文にも、自前のログにも出しません**（照合に失敗しても「確認できませんでした」としか言いません）。ただし鍵は URL に載っているので、**Cloudflare 側の呼び出し記録や `wrangler tail` にはリクエスト URL として映り得ます**。そのため `wrangler.jsonc` では Workers Logs の呼び出しごとの記録（`observability.logs.invocation_logs`）を切ってあり、`wrangler tail` の出力や MCP クライアントの設定画面など鍵つき URL が見える場所は、画面共有やログの貼り付けから外してください。URL 方式なのは、claude.ai と ChatGPT のコネクタが任意のヘッダを付けられないため（Authorization ヘッダ方式だと Web 側から繋げません）。役どころ（`role`）は `owner` と `friend` の2つが台帳に残っていますが、**現在は挙動の差がありません**（`progressions` が `chart_id` 方式になって owner 特権が無くなったため）。既存の鍵レコードとの互換と、将来の友だちキーのために型と検算だけ残してあります。
+
+なお 2026-08-22 に OAuth の入口（次の節）を足したので、**この URL 鍵はいわば旧口です**。すぐには畳まず並走させ、OAuth 側が落ち着いてから引退させる予定です。
+
+### OAuth の入口（`POST /astro/mcp`・Cloudflare Access）
+
+鍵は URL に載るので、**Cloudflare 側の記録や `wrangler tail` に映り得る**という弱みがあります。そこで身元をヘッダのトークンで確かめる入口を 2026-08-22 に足しました。中身の層はまったく同じで（同じハンドラ・同じツール12本・同じ台帳）、違うのは「誰か」の確かめ方だけです。
+
+```
+claude.ai / ChatGPT / Claude Code
+  │ OAuth（DCR・PKCE。実装は @cloudflare/workers-oauth-provider）
+  ▼
+POST /astro/mcp ──初回のサインイン──▶ Cloudflare Access for SaaS (OIDC)
+  │                                   （人の身元はここで確かめる）
+  │ 台帳（ASTRO_KV の email:<SHA-256>）に載っていれば通す。無ければ 403
+  ▼
+占星術層（URL 鍵の口とまったく同じハンドラ・同じチャート台帳）
+```
+
+- **二重の門**: Access のポリシー（そもそもサインインできる人）と、Worker 側の許可台帳（`email:<SHA-256>` → `{user, name, role}`）の両方を通った人だけが使えます。台帳に無ければ 403
+- **メールアドレスの生の文字列はどこにも置きません**。台帳の鍵名はハッシュ（SHA-256 の hex 小文字。前後の空白を落として小文字にしてから掛ける）で、レスポンスにも自前のログにも出しません
+- **鍵の口と同じ台帳**: 台帳のレコードの `user` を鍵側と同じ値（例: `owner`）にしておけば、OAuth で入っても鍵で入っても同じ `chart_id` が見えます
+- **並走中です**。URL 鍵（`POST /mcp/<鍵>`）は当面そのまま残します（claude.ai 側の OAuth に未解決の報告があるため、安定を確かめてから鍵を引退させる予定）。鍵が生きている間は `observability.logs.invocation_logs: false` も据え置きです
+- OAuth 面の実装（`src/auth/access-handler.ts` / `src/auth/workers-oauth-utils.ts`）は、同じ作者の保管庫MCPの門番 Worker（vault-gatekeeper）からの複製です。**変えたのは承認画面のブランド文言と import だけ**で、ロジックには手を入れていません
+- 初回接続のときに出る承認画面（「このクライアントを許可しますか」）は、サーバー名と説明だけ日本語にしてあります。ボタンなどの文言は手本のまま英語です（複製に手を入れない方針を優先しました）
+
+#### 立ち上げ（わーさん手番）
+
+1. **Access for SaaS アプリを作る**（Zero Trust → Access → Applications → Add → SaaS → OIDC）
+   - Redirect URL: `https://fortune-mcp.my-sky.blue/callback`
+   - ポリシー: 本人のみ（将来の友だちはここに足す）
+   - 出てくる Client ID / Client secret / Token・Authorization・Key の各エンドポイントを控える
+2. **OAuth 用の KV を作る**（トークンとグラントの置き場。チャートの台帳とは別棚）
+
+   ```bash
+   npx wrangler kv namespace create OAUTH_KV
+   # → 出力された id を wrangler.jsonc の kv_namespaces（binding: OAUTH_KV）に書く
+   ```
+
+   **この手順は 2026-08-22 に済んでいます**（`fortune-gatekeeper-OAUTH_KV`。id は `wrangler.jsonc` に入っています）。作り直すときだけ上のコマンドを使ってください。
+
+3. **Secret を 6 本入れる**（セッション外の端末で。会話ログに残さない）
+
+   ```bash
+   npx wrangler secret put ACCESS_CLIENT_ID
+   npx wrangler secret put ACCESS_CLIENT_SECRET
+   npx wrangler secret put ACCESS_TOKEN_URL
+   npx wrangler secret put ACCESS_AUTHORIZATION_URL
+   npx wrangler secret put ACCESS_JWKS_URL
+   npx wrangler secret put COOKIE_ENCRYPTION_KEY   # openssl rand -hex 32 などで作った 1 本
+   ```
+
+   雛形と説明は `.dev.vars.example` にあります（`ACCESS_ISSUER` は任意。未設定なら Token エンドポイントから末尾の `/token` を外したものを発行者とみなします）。
+
+4. **許可台帳にメールを載せる**（載せるのはハッシュだけ）
+
+   ```bash
+   npm run --silent email-hash -- someone@example.com   # → 64 桁の hex
+   # 引数を履歴に残したくないときは `npm run --silent email-hash` だけ実行して、標準入力に貼る
+
+   npx wrangler kv key put --binding ASTRO_KV "email:<出てきたハッシュ>" \
+     '{"user":"owner","name":"オーナー","role":"owner"}' --remote
+   ```
+
+   `user` を既存の鍵レコードと同じ値にすると、鍵で登録したチャートがそのまま見えます。
+
+5. `npm run deploy`
+6. **WAF / Bot Fight Mode で Anthropic の egress `160.79.104.0/21` を明示許可**（認証を完走したあとの POST が Bot 判定で落ちる事例があるため。門番 Worker のときと同じ注意）
+7. クライアント側の登録
+
+   ```bash
+   # Claude Code（登録後に /mcp で認証。ブラウザが開きます）
+   claude mcp add --transport http fortune-astro-oauth https://fortune-mcp.my-sky.blue/astro/mcp
+   ```
+
+   claude.ai は 設定 → コネクタ → カスタムコネクタに `https://fortune-mcp.my-sky.blue/astro/mcp` を登録（ChatGPT も同じ URL）。ツール定義そのものは鍵の口と同じなので「更新する」は要りませんが、**コネクタは作り直し**になります。
+
+#### 疎通確認
+
+```bash
+# 門が生きている（トークン無しなら 401 と WWW-Authenticate が返る）
+curl -i https://fortune-mcp.my-sky.blue/astro/mcp
+
+# 鍵の口は今までどおり（並走中）
+curl -s https://fortune-mcp.my-sky.blue/mcp/<鍵> \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
 
 ### ツール（12本）
 
@@ -269,7 +356,7 @@ npx wrangler kv key put --binding ASTRO_KV "key:<別の鍵>" \
   '{"user":"tomodachi","name":"ともだち","role":"friend"}' --remote
 ```
 
-出生データは `save_chart` を呼べば台帳に入るので、Secret（出生の原本を預ける口）は 2026-08-22 に引退しました。設定するものは KV と鍵だけです。ローカル開発では `--remote` を `--local` に替えると `.wrangler/state` 配下のローカル KV に入ります（`wrangler dev` が読むのはこちら）。
+出生データは `save_chart` を呼べば台帳に入るので、Secret（出生の原本を預ける口）は 2026-08-22 に引退しました。鍵の口に要るものは KV と鍵だけです（OAuth の口には別に KV 1 本と Access の Secret 6 本が要ります。「OAuth の入口」の立ち上げの節を参照）。ローカル開発では `--remote` を `--local` に替えると `.wrangler/state` 配下のローカル KV に入ります（`wrangler dev` が読むのはこちら）。
 
 疎通確認とツールの呼び出し:
 
@@ -293,7 +380,8 @@ claude mcp add --transport http fortune-astro https://fortune-mcp.my-sky.blue/mc
 
 ```
 fortune-gatekeeper/
-  src/index.ts          … 入り口（ルーティング・CORS・最外殻の例外処理）
+  src/worker.ts         … Workers の入口（wrangler の main）。OAuth の門を被せるだけの薄い1枚
+  src/index.ts          … ルーター（カード層・URL 鍵の口・CORS・最外殻の例外処理）
   src/mcp.ts            … JSON-RPC / MCP ハンドラ・ツール定義
   src/draw.ts           … ドローロジック（純関数）とテキスト整形
   src/iching.ts         … 易の立筮（純関数。擲銭法・本筮法・略筮法）とテキスト整形
@@ -314,13 +402,19 @@ fortune-gatekeeper/
   src/astro/returns.ts  … リターン（月・太陽）の一発計算と二次進行
   src/astro/yearly.ts   … 年間概要の走査（疎サンプル＋3次補間の日次表・純関数）
   src/astro/events.ts   … 期間内のイベント走査（疎サンプル＋3次エルミート補間・10分刻み・純関数）
-  src/astro/store.ts    … KV の台帳（鍵とチャート）
+  src/astro/store.ts    … KV の台帳（鍵・メールのハッシュ・チャート）
   src/astro/engine.ts   … Swiss Ephemeris の wasm を読む唯一の窓口
   src/astro/sweph/*     … sweph-wasm 一式（astro-viewer からの無改造コピー。手を入れない）
+  src/auth/oauth.ts     … OAuth の口の接合部（許可台帳の照合 → 占星術層へ）と defaultHandler
+  src/auth/access-handler.ts   … Cloudflare Access (OIDC) との往復（門番 Worker からの複製）
+  src/auth/workers-oauth-utils.ts … 承認画面・CSRF・state（同上。無改造）
+  src/auth/env.ts       … OAuth 面のバインディングの型（OAUTH_KV と Secret 6 本）
+  scripts/email-hash.mjs … メール → 台帳の鍵名に使うハッシュ（出すのはハッシュだけ）
+  .dev.vars.example     … Secret 6 本の雛形（実データは .dev.vars か wrangler secret へ）
   test/*.test.ts        … vitest
 ```
 
-ランタイム依存はゼロ（MCP SDK も使っていません）。カード層はバインディングも無し。占星術層だけが KV（`ASTRO_KV`）を使います（Secret は使いません）。
+ランタイム依存は OAuth 面の 1 つだけ（`@cloudflare/workers-oauth-provider`。MCP SDK は使っていません）。カード層はバインディングも無し。占星術層が KV を 2 本（台帳の `ASTRO_KV` と OAuth 用の `OAUTH_KV`）と、Cloudflare Access の Secret 6 本を使います。
 
 ## 動かし方
 
@@ -331,7 +425,10 @@ npm test               # vitest
 npm run type-check     # tsc --noEmit
 npm run dev            # wrangler dev（http://localhost:8789）
 npm run deploy         # wrangler deploy（Cloudflare Workers）
+npm run email-hash -- someone@example.com   # 許可台帳に載せるハッシュを出す（OAuth の口用）
 ```
+
+⚠ OAuth の口（`POST /astro/mcp`）を実際に通すには、KV（`OAUTH_KV`。作成済み）に加えて **Cloudflare Access の Secret 6 本**と**許可台帳への登録**が要ります。手順は「OAuth の入口」の立ち上げの節にあります。
 
 `wrangler dev` の疎通確認:
 
@@ -357,7 +454,9 @@ curl -s http://localhost:8789/mcp \
 | メソッド・パス | 中身 |
 |---|---|
 | `POST /mcp` | MCP（JSON-RPC 2.0・Streamable HTTP・ステートレス） |
-| `POST /mcp/<鍵>` | 占星術層の MCP（鍵が台帳に無ければ 401） |
+| `POST /astro/mcp` | 占星術層の MCP（OAuth。トークンが無ければ 401、台帳に無い人は 403） |
+| `POST /mcp/<鍵>` | 占星術層の MCP（URL 鍵。鍵が台帳に無ければ 401。OAuth と並走中） |
+| `/authorize` `/token` `/register` `/callback` `/.well-known/*` | OAuth の面（`@cloudflare/workers-oauth-provider` と Cloudflare Access） |
 | `GET /` | 案内文（プレーンテキスト） |
 | `GET /health` | `ok` |
 | `GET` / `DELETE` `/mcp` | 405（SSE ストリームもセッションも持たないため） |
@@ -412,5 +511,6 @@ npm test
 ## ライセンス
 
 - **コード**: [GNU AGPL-3.0](LICENSE)。同梱している [Swiss Ephemeris](https://www.astro.com/swisseph/)（Astrodienst AG）が AGPL-3.0 とプロフェッショナルライセンスのデュアルライセンスであり、本プロジェクトは AGPL-3.0 側を選択しています。`src/astro/sweph/` の wasm ビルドと JS ラッパーは [sweph-wasm](https://github.com/ptprashanttripathi/sweph-wasm) 由来（無改造）、その元は [Swiss Ephemeris](https://github.com/aloistr/swisseph) です。**由来の固定**（2026-08-22 照合）: 3 点とも npm の [`sweph-wasm@2.6.9`](https://www.npmjs.com/package/sweph-wasm/v/2.6.9)（AGPL-3.0-or-later、2025-09-09 公開）の `dist/` と SHA-256 が一致します——`swisseph.wasm` = `dist/wasm/swisseph.wasm`（`b8edc953c490d073f542fce22a9d50df85169fbb2e5e6573ec064df9d0bf622d`）、`swisseph.js` = `dist/wasm/swisseph.js`（`622f30215961d447b028448caf105f78b34b490a0246eae522465bf99bff9a4a`）、`sweph-wasm.js` = `dist/index.js`（`69edbea97573aa8171f40728e08d30d7ddd0c25cf3bf2c903e10e76267f33825`）。組み込まれている Swiss Ephemeris は `swe_version()` の返り値で **2.10.03**。同じバイナリを得たいときは上記バージョンの npm パッケージから取り出してください（`sweph/wasm/swisseph.js` だけはこちらで書いた再エクスポートの薄皮で、複製ではありません）
+- **OAuth 面のコード**: `src/auth/access-handler.ts` と `src/auth/workers-oauth-utils.ts` は、Cloudflare の公式デモ `remote-mcp-cf-access`（MIT）由来のコードを、同じ作者の保管庫MCPの門番 Worker（vault-gatekeeper）経由で複製したものです。**変えたのは承認画面のブランド文言と import だけ**で、ロジックには手を入れていません（差分を追えるようにしてあります）。依存の [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider)（MIT）は npm から入る唯一のランタイム依存です
 - **カードの文言・解説**（空オラクル・エニグマオラクルの `meaning` / `explanation`、`meanings/*.json`）: 作者（和条門尚樹）の著作物で、コードとは別に権利を保持します（単純併存＝mere aggregation であり AGPL の対象外）。デッキテキストの転載・再利用は別途ご相談ください
 - タロット・ルーンのカード名、六十四卦の卦名は古典・共有文化の範疇です

@@ -1,0 +1,21 @@
+# OAuth の門（POST /astro/mcp）が使う Secret 6 本の雛形。
+#
+# このファイルは雛形なのでリポに入っています。実データは .dev.vars（gitignore 済み）に置くか、
+# 本番なら `npx wrangler secret put <名前>` でセッション外の端末から入れてください
+# （会話ログにもコミットにも残さないため）。
+#
+# 上の 5 本は Cloudflare Zero Trust → Access → Applications で作った
+# 「SaaS アプリケーション（OIDC）」の画面に出る値です。
+ACCESS_CLIENT_ID=<Access for SaaS アプリの Client ID>
+ACCESS_CLIENT_SECRET=<同 Client secret>
+ACCESS_TOKEN_URL=<同 Token endpoint>
+ACCESS_AUTHORIZATION_URL=<同 Authorization endpoint>
+ACCESS_JWKS_URL=<同 Key endpoint>
+
+# 承認画面のクッキー（どのクライアントを承認済みか）を署名する鍵。
+# `openssl rand -hex 32` などで作った 1 本を入れてください。
+COOKIE_ENCRYPTION_KEY=<openssl rand -hex 32 の出力>
+
+# 任意。ID トークンの発行者（iss）を明示したいときだけ。
+# 未設定なら ACCESS_TOKEN_URL から末尾の /token を外したものを発行者とみなします。
+# ACCESS_ISSUER=<Access for SaaS アプリの issuer>

@@ -2,13 +2,20 @@
  * fortune-gatekeeper（占いMCP）の Wrangler 設定。
  *
  * カード層（POST /mcp）は状態も秘密も持たない直通電話のまま。
- * 占星術層（POST /mcp/<鍵>）だけが KV を 1 本使う ―― 鍵の台帳と、計算済みチャートの置き場。
+ * 占星術層は KV を使う ―― 鍵とメールの台帳、計算済みチャートの置き場（ASTRO_KV）。
+ * 2026-08-22 に OAuth の入口（POST /astro/mcp）を並走で足したので、
+ * OAuth のトークン置き場（OAUTH_KV）と Access の Secret 6 本がここに増えている。
+ *
+ * main が src/worker.ts なのは、そこが OAuth の門を被せた入口だから
+ * （門を通らない口はすべて今までどおり src/index.ts のルーターに落ちる）。
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "fortune-gatekeeper",
-  "main": "src/index.ts",
+  "main": "src/worker.ts",
   "compatibility_date": "2026-08-01",
+  // access-handler が JWT の base64url を解くのに node:buffer を使う（手本と同じ実装）
+  "compatibility_flags": ["nodejs_compat"],
   // Workers Logs は使うが、呼び出しごとの記録（リクエスト URL を含む）は残さない ―― 占星術層の鍵が
   // URL に載っているため。自前の console 出力だけが残る（鍵はそこにも書かない）。2026-08-22、査読対応
   "observability": {
@@ -23,16 +30,37 @@
   "limits": {
     "cpu_ms": 30000
   },
-  // 占星術層の台帳。key:<鍵> → {user,name,role} と chart:<user>:<chart_id> → 計算済みチャート。
+  // 占星術層の台帳。key:<鍵> と email:<SHA-256> → {user,name,role}、
+  // chart:<user>:<chart_id> → 計算済みチャート。
   // ⚠ デプロイ前に `npx wrangler kv namespace create ASTRO_KV` で作成し、
   //    出力された id をここに差し替えること。ローカル dev はこの id を使わない
   //    （`wrangler dev` は .wrangler/state 配下のローカル KV に読み書きする）。
+  //
+  // OAUTH_KV は @cloudflare/workers-oauth-provider がトークンとグラントを置く別棚。
+  // 2026-08-22 に作成済み（title: fortune-gatekeeper-OAUTH_KV）。
   "kv_namespaces": [
     {
       "binding": "ASTRO_KV",
       "id": "7a7079626493440493fb718744511d80"
+    },
+    {
+      "binding": "OAUTH_KV",
+      "id": "82c148adb45247e4bd28165e934fc112"
     }
   ],
+  // Cloudflare Access for SaaS (OIDC) アプリの値と、承認画面のクッキーを署名する鍵。
+  // `npx wrangler secret put <名前>` でセッション外の端末から入れる（会話ログに残さない）。
+  // 雛形は .dev.vars.example を参照。
+  "secrets": {
+    "required": [
+      "ACCESS_CLIENT_ID",
+      "ACCESS_CLIENT_SECRET",
+      "ACCESS_TOKEN_URL",
+      "ACCESS_AUTHORIZATION_URL",
+      "ACCESS_JWKS_URL",
+      "COOKIE_ENCRYPTION_KEY"
+    ]
+  },
   "dev": {
     // 8788 は vault-gatekeeper が使うので 8789 を借りる
     "port": 8789

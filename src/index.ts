@@ -11,6 +11,12 @@
  *
  * ⚠ 鍵は URL に載る。**レスポンスにもログにも鍵そのものを出さないこと**
  *    （照合に失敗しても「確認できませんでした」としか言わない）。
+ *
+ * このファイルは「鍵つき URL とカード層のルーター」で、Workers に渡す実際の入口は `src/worker.ts`
+ * （OAuth の門＝`POST /astro/mcp` と `/authorize` などを被せたもの）です。OAuth を通らない口は
+ * すべてここに落ちてきます ―― つまり下の `worker` が今までどおり全部を捌きます。
+ * `worker` を named export にしてあるのは、OAuth 面（`cloudflare:workers` を読むため Node では
+ * 動かない）に触らずにこのルーターだけをテストから叩けるようにするためです。
  */
 import { CORS_HEADERS, handleMcpRequest, jsonResponse } from "./mcp";
 import { handleAstroMcpRequest, lookupKey, type AstroKv } from "./astro/astro-mcp";
@@ -74,7 +80,7 @@ function methodNotAllowed(): Response {
 /** 鍵つき URL の形。`/mcp/<鍵>` ちょうど 1 階層だけ */
 const ASTRO_PATH = /^\/mcp\/([^/]+)\/?$/;
 
-export default {
+export const worker = {
   async fetch(request: Request, env?: MaybeEnv): Promise<Response> {
     try {
       const url = new URL(request.url);
@@ -159,3 +165,9 @@ export default {
     }
   },
 };
+
+/**
+ * 既定の書き出し。テスト（`import worker from "../src/index"`）と、
+ * `src/worker.ts` の OAuth 面から見た「素通しの落とし先」が同じものを指します。
+ */
+export default worker;

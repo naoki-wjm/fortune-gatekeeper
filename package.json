@@ -10,12 +10,16 @@
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "type-check": "tsc --noEmit",
-    "sync:decks": "node scripts/sync-decks.mjs"
+    "sync:decks": "node scripts/sync-decks.mjs",
+    "email-hash": "node scripts/email-hash.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260815.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.123.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.8.1"
   }
 }
