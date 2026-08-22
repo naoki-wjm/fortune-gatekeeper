@@ -8,6 +8,7 @@ import {
   type AuthContext,
   type StoredChart,
 } from "../src/astro/store";
+import { calculateNumerology } from "../src/numerology";
 import type { RandomSource } from "../src/random";
 import { FakeKv } from "./stubs/fake-kv";
 import { FAKE_ASCMC, FAKE_CUSPS, makeFakeEngine, type FakeEngine } from "./stubs/fake-engine";
@@ -103,6 +104,25 @@ async function saveDefaultChart(): Promise<string> {
 }
 
 /**
+ * 出生データを預からなかった時代の登録を再現する（台帳へ直接置く）。
+ *
+ * 今の save_chart は必ず birth を入れるので、この形はもう作れません。
+ * 古い登録でも読めること・progressions だけは登録し直しを案内することを見るための細工です。
+ */
+function putLegacyChart(chartId = "legacy01", user = "user1"): string {
+  const legacy: StoredChart = {
+    label: "むかしの図",
+    house_system: "P",
+    planets: [{ id: 0, lon: 0, speed: 1 }],
+    cusps: [...FAKE_CUSPS],
+    ascmc: [...FAKE_ASCMC],
+    created: "2026-08-01T00:00:00.000Z",
+  };
+  kv.store.set(`chart:${user}:${chartId}`, JSON.stringify(legacy));
+  return chartId;
+}
+
+/**
  * 偽エンジンの天体を 1 つだけずらす（以後に計算される図にだけ効く）。
  *
  * 偽エンジンは天体を 30° の格子に並べるので、素のままだと図の中のアスペクトが
@@ -137,8 +157,10 @@ describe("占星術層の initialize / tools/list", () => {
     // 計算はサーバー、解釈は会話中の LLM
     expect(instructions).toContain("計算するのはサーバー");
     expect(instructions).toContain("解釈は一切しません");
-    // 原本レス
-    expect(instructions).toContain("出生日時と出生地は計算に使ったあと捨てます");
+    // 出生データは台帳が預かる（値は返事に出さない）
+    expect(instructions).toContain("この鍵の台帳に預かります");
+    expect(instructions).toContain("返事には出生データそのものは出しません");
+    expect(instructions).toContain("delete_chart で消えます");
     // ツールの使い分け
     expect(instructions).toContain("save_chart");
     expect(instructions).toContain("list_charts");
@@ -149,9 +171,16 @@ describe("占星術層の initialize / tools/list", () => {
     expect(instructions).toContain("solar_return");
     expect(instructions).toContain("yearly_overview");
     expect(instructions).toContain("transit_events");
-    // 二次進行は「原本を預けた本人だけ」と断ってある
+    // 誕生日から引く占術（出生データを預かるようになって足せた口）
+    expect(instructions).toContain("calculate_numerology");
+    expect(instructions).toContain("ライフパス 4 経路");
+    // chart_id でも生年月日の直接指定でも呼べる。公開層には無い、と言い切る
+    expect(instructions).toContain("chart_id か生年月日の直接指定");
+    expect(instructions).toContain("公開のカード層には無く");
+    // 二次進行も chart_id 方式（出生データを預かっているチャートが要る）
     expect(instructions).toContain("progressions");
-    expect(instructions).toContain("原本を預けた本人");
+    expect(instructions).toContain("progressions も chart_id で呼べます");
+    expect(instructions).not.toContain("本人の URL");
     // カード層の文言は混ざらない
     expect(instructions).not.toContain("draw_cards");
     // 作者の氏名は書かない
@@ -168,7 +197,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("11 本のツールを返す", async () => {
+  it("12 本のツールを返す", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -183,6 +212,7 @@ describe("占星術層の initialize / tools/list", () => {
       "update_default_location",
       "yearly_overview",
       "transit_events",
+      "calculate_numerology",
     ]);
   });
 
@@ -251,6 +281,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
       "update_default_location",
       "yearly_overview",
       "transit_events",
+      "calculate_numerology",
     ]);
   });
 
@@ -274,6 +305,9 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
 
   // 2026-08-22 roll_astro_dice 追加で更新（カード層のツールが増えても占星術層は混ざらない）
   // 2026-08-22 cast_geomancy 追加で更新（同上）
+  // 2026-08-22 calculate_numerology 追加で更新（同上）
+  // 2026-08-22 calculate_numerology を鍵つき層へ移して 5 本に戻した
+  //            （公開層には個人データの口を生やさない）
   it("公開カード層は無傷（カード層のツールだけ・鍵も要らない）", async () => {
     const { response, json } = await fetchMcp("/mcp", {
       jsonrpc: "2.0",
@@ -299,8 +333,8 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
 });
 
 describe("save_chart", () => {
-  it("chart_id とネイタル要約を返し、出生日時・出生地は保存しない", async () => {
-    // 出生地（東京）と「いつもの場所」（大阪）をわざと別にして、残るのが後者だけだと確かめる
+  it("chart_id とネイタル要約を返す。出生データは台帳に預かり、返事には出さない", async () => {
+    // 出生地（東京）と「いつもの場所」（大阪）をわざと別にして、返事に出るのが後者だけだと確かめる
     const result = await call("save_chart", {
       ...BIRTH,
       default_lat: 34.6937,
@@ -322,15 +356,29 @@ describe("save_chart", () => {
     expect(text).toContain("月 牡牛座 0°00′ (11H)");
     expect(text).toContain("金星 蟹座 0°00′ (1H)（逆行）");
     expect(text).toContain("ASC 蟹座 0°00′ / MC 水瓶座 0°00′");
-    expect(text.trimEnd().endsWith("出生日時・出生地は保存していません（計算に使って捨てました）。")).toBe(
-      true,
-    );
+    expect(
+      text
+        .trimEnd()
+        .endsWith(
+          "出生データ（日時・時差・緯度経度）はこのチャートに預かりました。返事には出しません。delete_chart で消えます。",
+        ),
+    ).toBe(true);
 
-    // KV に落ちた中身に、出生日時・出生地・jd が混ざっていないこと
+    // 返事には出生データの値を出さない（テキストにも structuredContent にも）
+    expect(text).not.toContain("1990");
+    expect(text).not.toContain("35.6895");
+    expect(text).not.toContain("139.6917");
+    expect(Object.keys(result.structuredContent)).not.toContain("birth");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("1990");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("35.6895");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("139.6917");
+
+    // KV には計算済みの座標と一緒に出生データが入る（預かる先はここだけ）
     const raw = kv.store.get(`chart:user1:${chartId}`) as string;
     const stored = JSON.parse(raw);
     expect(Object.keys(stored).sort()).toEqual([
       "ascmc",
+      "birth",
       "created",
       "cusps",
       "default_location",
@@ -338,16 +386,24 @@ describe("save_chart", () => {
       "label",
       "planets",
     ]);
-    // 出生年・出生地の緯度経度はどこにも残っていない
-    expect(raw).not.toContain("1990");
-    expect(raw).not.toContain("35.6895");
-    expect(raw).not.toContain("139.6917");
+    expect(stored.birth).toEqual({
+      year: 1990,
+      month: 6,
+      day: 15,
+      hour: 12,
+      minute: 0,
+      utc_offset: 0,
+      lat: 35.6895,
+      lng: 139.6917,
+    });
+    // jd（出生の瞬間そのもの）は入れない
+    expect(Object.keys(stored)).not.toContain("jd");
     expect(stored.planets).toHaveLength(11);
     expect(stored.planets[0]).toEqual({ id: 0, lon: 0, speed: 1 });
-    // 明示的に預けた「いつもの場所」だけが残る
+    // 「いつもの場所」は出生地とは別の覚え書き（こちらは返事にも出る）
     expect(stored.default_location).toEqual({ lat: 34.6937, lng: 135.5023, label: "大阪" });
 
-    // 計算そのものには出生地がちゃんと渡っている（渡してから捨てている）
+    // 計算そのものには出生地がちゃんと渡っている
     expect(engine.houseCalls[0]?.lat).toBe(35.6895);
     expect(engine.houseCalls[0]?.lng).toBe(139.6917);
   });
@@ -409,16 +465,31 @@ describe("list_charts / delete_chart", () => {
     expect(result.structuredContent.charts).toEqual([]);
     expect(result.content[0].text).toContain("保存済みのチャートはまだありません");
     expect(result.content[0].text).toContain("save_chart");
+    // 案内文も新方針（預かる・返事には出さない・delete_chart で消える）
+    expect(result.content[0].text).toContain("この鍵の台帳に預かります");
   });
 
-  it("登録すると一覧に出る", async () => {
+  it("登録すると一覧に出る（出生データは「あり」だけを添える）", async () => {
     const chartId = await saveDefaultChart();
     const result = await call("list_charts");
     expect(result.structuredContent.charts).toHaveLength(1);
     expect(result.structuredContent.charts[0].chart_id).toBe(chartId);
+    expect(result.structuredContent.charts[0].has_birth).toBe(true);
     expect(result.content[0].text).toContain("保存済みチャート（1件）");
     expect(result.content[0].text).toContain(`- ${chartId}: サンプル`);
     expect(result.content[0].text).toContain("プラシーダス（P）");
+    expect(result.content[0].text).toContain("出生データ: あり");
+    // 一覧にも値そのものは出さない
+    expect(result.content[0].text).not.toContain("1990");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("139.6917");
+  });
+
+  it("出生データの無い古い登録は「なし」と添え、has_birth も false", async () => {
+    const chartId = putLegacyChart();
+    const result = await call("list_charts");
+    expect(result.structuredContent.charts[0].chart_id).toBe(chartId);
+    expect(result.structuredContent.charts[0].has_birth).toBe(false);
+    expect(result.content[0].text).toContain("出生データ: なし（登録し直すと progressions などが使えます）");
   });
 
   it("他人のチャートは見えない（chart: の前置きで仕切ってある）", async () => {
@@ -438,7 +509,10 @@ describe("list_charts / delete_chart", () => {
 
     const removed = await call("delete_chart", { chart_id: chartId });
     expect(removed.isError).toBeUndefined();
-    expect(removed.content[0].text).toBe(`チャート ${chartId}（サンプル）を削除しました。`);
+    expect(removed.content[0].text).toBe(
+      `チャート ${chartId}（サンプル）を削除しました。預かっていた出生データも一緒に消えました。`,
+    );
+    expect(removed.structuredContent.birth_removed).toBe(true);
     expect(kv.store.has(`chart:user1:${chartId}`)).toBe(false);
 
     const again = await call("delete_chart", { chart_id: chartId });
@@ -446,6 +520,14 @@ describe("list_charts / delete_chart", () => {
     expect(again.content[0].text).toContain("見つかりませんでした");
 
     expect((await call("list_charts")).structuredContent.charts).toEqual([]);
+  });
+
+  it("出生データの無い古い登録を消すときは、消えたとは言わない", async () => {
+    const chartId = putLegacyChart();
+    const removed = await call("delete_chart", { chart_id: chartId });
+    expect(removed.isError).toBeUndefined();
+    expect(removed.content[0].text).toBe(`チャート ${chartId}（むかしの図）を削除しました。`);
+    expect(removed.structuredContent.birth_removed).toBe(false);
   });
 });
 
@@ -499,8 +581,10 @@ describe("get_chart", () => {
       expect(hit.b).not.toBe("Nノード");
       expect(hit).not.toHaveProperty("applying");
     }
-    // 出生日時・出生地は読み直しても出てこない（そもそも持っていない）
+    // 出生データは預かっているが、読み直しても出てこない（読み戻す口は無い）
     expect(text).not.toContain("1990");
+    expect(text).not.toContain("35.6895");
+    expect(Object.keys(structured)).not.toContain("birth");
     expect(JSON.stringify(structured)).not.toContain("139.6917");
   });
 
@@ -1289,33 +1373,20 @@ describe("update_default_location", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 二次進行（オーナー特権）
+// 二次進行
 // ---------------------------------------------------------------------------
-
-/** ダミーの出生原本（本物の値ではない。1990-06-15 12:00 UTC・東京） */
-const OWNER_NATAL_JSON = JSON.stringify({
-  user: "user1",
-  year: 1990,
-  month: 6,
-  day: 15,
-  hour: 12,
-  minute: 0,
-  utc_offset: 0,
-  lat: 35.6895,
-  lng: 139.6917,
-  house_system: "P",
-});
 
 const FRIEND: AuthContext = { user: "friend1", name: "ともだち", role: "friend" };
 
 describe("progressions", () => {
-  it("オーナー＋原本ありなら、進行天体・進行 ASC/MC・クロスアスペクトを返す", async () => {
-    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
-    const result = await call("progressions", {}, owner);
+  it("預かっている出生データで、進行天体・進行 ASC/MC・クロスアスペクトを返す", async () => {
+    const chartId = await saveDefaultChart();
+    const result = await call("progressions", { chart_id: chartId });
     expect(result.isError).toBeUndefined();
 
     const text: string = result.content[0].text;
     expect(text.split("\n")[0]).toBe("プログレッション（二次進行・一日一年法）");
+    expect(text).toContain(`チャート: サンプル（${chartId}）`);
     // 1990-06-15 → 2026-08-20 は 36.18 年ぶん
     expect(text).toContain("対象日: 2026-08-20（今日・UTC の暦） / 36歳2ヶ月相当");
     expect(text).toContain("ハウス方式: プラシーダス（P）");
@@ -1329,11 +1400,14 @@ describe("progressions", () => {
     // トランジットの記号（T.）は使わない
     expect(text).not.toContain("T.太陽");
 
-    // **出生日時・出生地の数値は書かない**
+    // **預かっていても、出生日時・出生地の数値は返事に出さない**
     expect(text).not.toContain("1990");
     expect(text).not.toContain("35.6895");
     expect(text).not.toContain("139.6917");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("1990");
     expect(JSON.stringify(result.structuredContent)).not.toContain("35.6895");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("139.6917");
+    expect(Object.keys(result.structuredContent)).not.toContain("birth");
 
     // ARMC 方式のハウスは出生地の緯度・真黄道傾斜・チャートのハウス方式で立つ
     expect(engine.armcCalls).toHaveLength(1);
@@ -1342,6 +1416,8 @@ describe("progressions", () => {
     expect(engine.armcCalls[0]?.hsys).toBe("P");
 
     const structured = result.structuredContent;
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.label).toBe("サンプル");
     expect(structured.target_date).toBe("2026-08-20");
     expect(structured.is_today).toBe(true);
     expect(structured.age_label).toBe("36歳2ヶ月相当");
@@ -1354,72 +1430,363 @@ describe("progressions", () => {
     expect(Object.keys(structured)).not.toContain("progressed_jd");
   });
 
-  it("対象日を指定できる。utc_offset は「今日」の暦にも効く", async () => {
-    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
+  it("ハウス方式はチャートに登録したものを使う", async () => {
+    const saved = await call("save_chart", { ...BIRTH, house_system: "W" });
+    const chartId: string = saved.structuredContent.chart_id;
 
-    const dated = await call("progressions", { year: 2030, month: 1, day: 1 }, owner);
+    const result = await call("progressions", { chart_id: chartId });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("ハウス方式: ホールサイン（W）");
+    expect(result.structuredContent.house_system).toBe("W");
+    expect(engine.armcCalls[0]?.hsys).toBe("W");
+  });
+
+  it("対象日を指定できる。utc_offset は「今日」の暦にも効く", async () => {
+    const chartId = await saveDefaultChart();
+
+    const dated = await call("progressions", { chart_id: chartId, year: 2030, month: 1, day: 1 });
     expect(dated.content[0].text).toContain("対象日: 2030-01-01 / 39歳6ヶ月相当");
     expect(dated.structuredContent.is_today).toBe(false);
 
     // 現在は 2026-08-20 02:15 UTC ＝ UTC-9 の土地ではまだ 8/19
-    const shifted = await call("progressions", { utc_offset: -9 }, owner);
+    const shifted = await call("progressions", { chart_id: chartId, utc_offset: -9 });
     expect(shifted.content[0].text).toContain("対象日: 2026-08-19（今日・UTC-9 の暦）");
   });
 
   it("year / month / day は 3 つそろえて。出生より前は断る", async () => {
-    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
+    const chartId = await saveDefaultChart();
 
-    const partial = await call("progressions", { year: 2030 }, owner);
+    const partial = await call("progressions", { chart_id: chartId, year: 2030 });
     expect(partial.isError).toBe(true);
     expect(partial.content[0].text).toContain("そろえて指定してください");
 
-    const tooEarly = await call("progressions", { year: 1980, month: 1, day: 1 }, owner);
+    const tooEarly = await call("progressions", {
+      chart_id: chartId,
+      year: 1980,
+      month: 1,
+      day: 1,
+    });
     expect(tooEarly.isError).toBe(true);
     expect(tooEarly.content[0].text).toContain("対象日が出生より前です");
   });
 
-  it("friend の鍵では使えない（原本の有無には触れない）", async () => {
-    const friend: AstroContext = { ...context, auth: FRIEND, ownerNatal: OWNER_NATAL_JSON };
-    const result = await call("progressions", {}, friend);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("出生原本を預けた本人専用です");
-    // 原本の中身も、預かっているかどうかも言わない
-    expect(result.content[0].text).not.toContain("OWNER_NATAL");
-    expect(result.content[0].text).not.toContain("1990");
+  it("chart_id は必須。知らない ID・他人のチャートは丁寧に断る", async () => {
+    const missing = await call("progressions", {});
+    expect(missing.isError).toBe(true);
+    expect(missing.content[0].text).toContain("chart_id は必須です");
+
+    const unknown = await call("progressions", { chart_id: "nosuchid" });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain("チャート nosuchid が見つかりませんでした");
+    expect(unknown.content[0].text).toContain("list_charts");
+
+    // 他人の棚は覗けない（chart: の前置きで仕切ってある）
+    const chartId = await saveDefaultChart();
+    const other: AstroContext = { ...context, auth: FRIEND };
+    const peek = await call("progressions", { chart_id: chartId }, other);
+    expect(peek.isError).toBe(true);
+    expect(peek.content[0].text).toContain("見つかりませんでした");
   });
 
-  it("原本が預けられていなければ、その設定が要ると言う", async () => {
-    const result = await call("progressions", {}); // context には ownerNatal が無い
+  it("出生データの無い古い登録では、値に触れずに登録し直しを案内する", async () => {
+    const chartId = putLegacyChart();
+    const result = await call("progressions", { chart_id: chartId });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("出生の原本が預けられていない");
-    expect(result.content[0].text).toContain("wrangler secret put OWNER_NATAL");
+    expect(result.content[0].text).toContain("このチャートには出生データが入っていません");
+    expect(result.content[0].text).toContain("delete_chart で消して save_chart で登録し直す");
+    // 断るだけで、計算にも行かない
+    expect(engine.armcCalls).toHaveLength(0);
   });
 
-  it("原本の持ち主が違えば断る", async () => {
-    const other: AstroContext = {
-      ...context,
-      ownerNatal: JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), user: "someone-else" }),
-    };
-    const result = await call("progressions", {}, other);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("出生原本の持ち主のものではありません");
-    expect(result.content[0].text).not.toContain("someone-else");
+  it("friend の鍵でも使える（role では門番しない）", async () => {
+    const friend: AstroContext = { ...context, auth: FRIEND };
+    const saved = await call("save_chart", BIRTH, friend);
+    const chartId: string = saved.structuredContent.chart_id;
+
+    const result = await call("progressions", { chart_id: chartId }, friend);
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("プログレッション（二次進行・一日一年法）");
+    expect(result.structuredContent.chart_id).toBe(chartId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 数秘術（誕生日から引く占術）
+// ---------------------------------------------------------------------------
+
+/**
+ * 数秘の見本（1986-12-29 生まれ）。
+ *
+ * ライフパスが 11 と 2 に割れる日で、このツールが 4 経路を並べる理由そのもの。
+ * 生まれ年を 1986 にしてあるのは、返事に混じったら "1986" ですぐ見つかるようにするため
+ * （基準日にはわざと別の年を使う ―― 同じ数だと「出ていない」の確かめにならないので）。
+ */
+const NUMEROLOGY_BIRTH = { ...BIRTH, label: "数秘の見本", year: 1986, month: 12, day: 29 };
+
+async function saveNumerologyChart(): Promise<string> {
+  const saved = await call("save_chart", NUMEROLOGY_BIRTH);
+  expect(saved.isError).toBeUndefined();
+  return saved.structuredContent.chart_id as string;
+}
+
+describe("calculate_numerology", () => {
+  it("預かっている出生日から 4 経路と途中式を返す（純関数と同じ数）", async () => {
+    const chartId = await saveNumerologyChart();
+    const result = await call("calculate_numerology", {
+      chart_id: chartId,
+      target_year: 2026,
+      target_month: 8,
+      target_day: 22,
+    });
+    expect(result.isError).toBeUndefined();
+
+    // 算法はカード層と同じ純関数。ここで見るのは「出生日の出どころ」だけ
+    const expected = calculateNumerology({
+      year: 1986,
+      month: 12,
+      day: 29,
+      target: { year: 2026, month: 8, day: 22 },
+    });
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe(`チャート: 数秘の見本（${chartId}）`);
+    expect(text).toContain("■ 数秘術（生年月日ベース・ピタゴラス式）");
+    expect(text).toContain("ライフパス: 11 / 2 ← 経路で割れています");
+    expect(text).toContain("パーソナルデイ 2026-08-22: 9（4 経路一致）");
+
+    const structured = result.structuredContent;
+    expect(structured.source).toBe("chart");
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.label).toBe("数秘の見本");
+    expect(structured.life_path).toEqual(expected.life_path);
+    expect(structured.life_path.values).toEqual([11, 2]);
+    expect(structured.life_path.presets.full_sum.value).toBe(11);
+    expect(structured.life_path.presets.no_master.value).toBe(2);
+    expect(structured.birthday).toEqual(expected.birthday);
+    expect(structured.attitude).toEqual(expected.attitude);
+    expect(structured.personal_year).toEqual(expected.personal_year);
+    expect(structured.personal_month).toEqual(expected.personal_month);
+    expect(structured.personal_day).toEqual(expected.personal_day);
+    expect(structured.conventions).toMatchObject({
+      masters: [11, 22, 33],
+      personal_year_start: "calendar",
+    });
   });
 
-  it("原本が壊れていたら、中身に触れずに断る", async () => {
-    for (const broken of [
-      "これは JSON ではありません",
-      JSON.stringify({ user: "user1", year: 1990 }),
-      JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), house_system: "Z" }),
-      JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), lat: 999 }),
+  it("生まれ年は返事に出さない（日はバースデーナンバーとして出る）", async () => {
+    const chartId = await saveNumerologyChart();
+    const result = await call("calculate_numerology", {
+      chart_id: chartId,
+      target_year: 2026,
+      target_month: 8,
+      target_day: 22,
+    });
+
+    const text: string = result.content[0].text;
+    // 生まれ年・生まれ月の生の数字も、出生地の座標も出ない
+    expect(text).not.toContain("1986");
+    expect(text).not.toContain("35.6895");
+    expect(text).not.toContain("139.6917");
+    const json = JSON.stringify(result.structuredContent);
+    expect(json).not.toContain("1986");
+    expect(json).not.toContain("35.6895");
+    expect(json).not.toContain("139.6917");
+    expect(Object.keys(result.structuredContent)).not.toContain("birth");
+
+    // 生まれた日だけはバースデーナンバーとしてそのまま出る（日だけでは出生日は復元できない）
+    expect(text).toContain("バースデー: 29 → 11 (→2)");
+    expect(result.structuredContent.birthday.day).toBe(29);
+  });
+
+  it("基準日を省くと今日で見る（utc_offset で日付が変わる）", async () => {
+    const chartId = await saveNumerologyChart();
+
+    // 現在は 2026-08-20 02:15 UTC。省略時の暦は progressions と同じ UTC
+    const today = await call("calculate_numerology", { chart_id: chartId });
+    expect(today.isError).toBeUndefined();
+    expect(today.structuredContent.personal_day).toMatchObject({
+      year: 2026,
+      month: 8,
+      day: 20,
+    });
+    expect(today.content[0].text).toContain("パーソナルデイ 2026-08-20");
+
+    // UTC-9 の土地ではまだ 8/19
+    const shifted = await call("calculate_numerology", { chart_id: chartId, utc_offset: -9 });
+    expect(shifted.structuredContent.personal_day).toMatchObject({
+      year: 2026,
+      month: 8,
+      day: 19,
+    });
+
+    // UTC+9 なら同じ日の 11:15 なので 8/20 のまま
+    const jst = await call("calculate_numerology", { chart_id: chartId, utc_offset: 9 });
+    expect(jst.structuredContent.personal_day.day).toBe(20);
+  });
+
+  it("masters: 11_22 は 33 を認めない", async () => {
+    // 1959-03-06 は全桁の和が 33（既定では保持、11_22 なら 6 まで落ちる）
+    const saved = await call("save_chart", {
+      ...BIRTH,
+      label: "33 の見本",
+      year: 1959,
+      month: 3,
+      day: 6,
+    });
+    const chartId: string = saved.structuredContent.chart_id;
+
+    const wide = await call("calculate_numerology", { chart_id: chartId });
+    expect(wide.structuredContent.life_path.presets.full_sum.value).toBe(33);
+
+    const narrow = await call("calculate_numerology", { chart_id: chartId, masters: "11_22" });
+    expect(narrow.structuredContent.life_path.presets.full_sum.value).toBe(6);
+    expect(narrow.structuredContent.conventions.masters).toEqual([11, 22]);
+  });
+
+  it("出生データの無い古い登録では、値に触れずに登録し直しを案内する", async () => {
+    const chartId = putLegacyChart();
+    const result = await call("calculate_numerology", { chart_id: chartId });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("このチャートには出生データが入っていません");
+    expect(result.content[0].text).toContain("delete_chart で消して save_chart で登録し直す");
+    // 断るだけで、数は 1 つも出さない
+    expect(result.content[0].text).not.toContain("ライフパス");
+    expect(result.structuredContent).toBeUndefined();
+  });
+
+  it("知らない ID・他人のチャートは丁寧に断る", async () => {
+    const unknown = await call("calculate_numerology", { chart_id: "nosuchid" });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain("チャート nosuchid が見つかりませんでした");
+    expect(unknown.content[0].text).toContain("list_charts");
+
+    // 他人の棚は覗けない
+    const chartId = await saveNumerologyChart();
+    const other: AstroContext = { ...context, auth: FRIEND };
+    const peek = await call("calculate_numerology", { chart_id: chartId }, other);
+    expect(peek.isError).toBe(true);
+    expect(peek.content[0].text).toContain("見つかりませんでした");
+  });
+
+  it("基準日の部分指定・暦に無い日・知らない masters・未知の引数を断る", async () => {
+    const chartId = await saveNumerologyChart();
+
+    for (const partial of [
+      { target_year: 2026 },
+      { target_year: 2026, target_month: 8 },
+      { target_month: 8, target_day: 22 },
+      { target_day: 22 },
     ]) {
-      const ctx: AstroContext = { ...context, ownerNatal: broken };
-      const result = await call("progressions", {}, ctx);
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("読み取れませんでした");
-      expect(result.content[0].text).not.toContain("year");
-      expect(result.content[0].text).not.toContain("1990");
+      const result = await call("calculate_numerology", { chart_id: chartId, ...partial });
+      expect(result.isError, JSON.stringify(partial)).toBe(true);
+      expect(result.content[0].text).toContain("3 つそろえて指定してください");
     }
+
+    const noSuchDay = await call("calculate_numerology", {
+      chart_id: chartId,
+      target_year: 2026,
+      target_month: 4,
+      target_day: 31,
+    });
+    expect(noSuchDay.isError).toBe(true);
+    expect(noSuchDay.content[0].text).toContain("2026-04-31 は暦に存在しない日付です");
+
+    const badMasters = await call("calculate_numerology", {
+      chart_id: chartId,
+      masters: "11_22_33_44",
+    });
+    expect(badMasters.isError).toBe(true);
+    expect(badMasters.content[0].text).toContain("masters は 11_22_33 / 11_22");
+
+    const badOffset = await call("calculate_numerology", { chart_id: chartId, utc_offset: 20 });
+    expect(badOffset.isError).toBe(true);
+    expect(badOffset.content[0].text).toContain("utc_offset は -14 以上 14 以下");
+
+    // 綴り違いは黙って無視しない（許可キーはツール定義から作っている）
+    const typo = await call("calculate_numerology", { chart_id: chartId, master: "11_22" });
+    expect(typo.isError).toBe(true);
+    expect(typo.content[0].text).toContain("未知の引数です: master");
+    expect(typo.content[0].text).toContain("masters");
+  });
+
+  // ここから下は「登録せずに一度だけ見る」ための直接指定（2026-08-22）
+  it("生年月日の直接指定でも引ける（登録は要らない）", async () => {
+    const result = await call("calculate_numerology", {
+      year: 1986,
+      month: 12,
+      day: 29,
+      target_year: 2026,
+      target_month: 8,
+      target_day: 22,
+    });
+    expect(result.isError).toBeUndefined();
+
+    // 算法は chart_id 版とまったく同じ純関数（違うのは生年月日の出どころだけ）
+    const expected = calculateNumerology({
+      year: 1986,
+      month: 12,
+      day: 29,
+      target: { year: 2026, month: 8, day: 22 },
+    });
+
+    const text: string = result.content[0].text;
+    expect(text.split("\n")[0]).toBe("生年月日: 直接指定（値は返事に出しません）");
+    expect(text).toContain("ライフパス: 11 / 2 ← 経路で割れています");
+    expect(text).toContain("パーソナルデイ 2026-08-22: 9（4 経路一致）");
+
+    const structured = result.structuredContent;
+    expect(structured.source).toBe("direct");
+    // 台帳を経由していないので chart_id / label は入れない
+    expect(Object.keys(structured)).not.toContain("chart_id");
+    expect(Object.keys(structured)).not.toContain("label");
+    expect(structured.life_path).toEqual(expected.life_path);
+    expect(structured.birthday).toEqual(expected.birthday);
+    expect(structured.personal_day).toEqual(expected.personal_day);
+  });
+
+  it("直接指定でも生まれ年は返事に出さない（鍵つき層の約束は同じ）", async () => {
+    const result = await call("calculate_numerology", {
+      year: 1986,
+      month: 12,
+      day: 29,
+      target_year: 2026,
+      target_month: 8,
+      target_day: 22,
+    });
+    expect(result.content[0].text).not.toContain("1986");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("1986");
+    // 生まれた日だけはバースデーナンバーとしてそのまま出る
+    expect(result.content[0].text).toContain("バースデー: 29 → 11 (→2)");
+  });
+
+  it("chart_id と生年月日はどちらか一方（両方・どちらも無しは断る）", async () => {
+    const chartId = await saveNumerologyChart();
+
+    const both = await call("calculate_numerology", {
+      chart_id: chartId,
+      year: 1986,
+      month: 12,
+      day: 29,
+    });
+    expect(both.isError).toBe(true);
+    expect(both.content[0].text).toContain("どちらか一方にしてください");
+
+    const neither = await call("calculate_numerology", {});
+    expect(neither.isError).toBe(true);
+    expect(neither.content[0].text).toContain("chart_id か year / month / day を指定してください");
+
+    // 直接指定の打ち忘れも、残りを勝手に埋めずに断る
+    for (const partial of [{ year: 1986 }, { year: 1986, month: 12 }, { month: 12, day: 29 }]) {
+      const result = await call("calculate_numerology", partial);
+      expect(result.isError, JSON.stringify(partial)).toBe(true);
+      expect(result.content[0].text).toContain("year / month / day の 3 つをそろえて");
+    }
+  });
+
+  it("直接指定でも暦に無い生年月日は断る", async () => {
+    const result = await call("calculate_numerology", { year: 1986, month: 2, day: 31 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("1986-02-31 は暦に存在しない日付です");
   });
 });
 
@@ -1807,30 +2174,24 @@ describe("実在しない暦日", () => {
   });
 
   it("progressions: 対象日も暦で検算する", async () => {
-    const owner: AstroContext = { ...context, ownerNatal: OWNER_NATAL_JSON };
+    const chartId = await saveDefaultChart();
 
-    const ok = await call("progressions", { year: 2024, month: 2, day: 29 }, owner);
+    const ok = await call("progressions", { chart_id: chartId, year: 2024, month: 2, day: 29 });
     expect(ok.isError).toBeUndefined();
     expect(ok.content[0].text).toContain("対象日: 2024-02-29");
 
     for (const date of INVALID) {
-      const ng = await call("progressions", date, owner);
+      const ng = await call("progressions", { chart_id: chartId, ...date });
       expect(ng.isError).toBe(true);
       expect(ng.content[0].text).toContain("は暦に存在しない日付です");
     }
   });
 
-  it("progressions: 原本（OWNER_NATAL）の日付が暦に無いときは、値を出さずに断る", async () => {
-    const ctx: AstroContext = {
-      ...context,
-      ownerNatal: JSON.stringify({ ...JSON.parse(OWNER_NATAL_JSON), month: 2, day: 31 }),
-    };
-    const result = await call("progressions", {}, ctx);
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("OWNER_NATAL の日付が暦に存在しません");
-    // 預かりものなので、日付そのものは書かない
-    expect(result.content[0].text).not.toContain("31");
-    expect(result.content[0].text).not.toContain("1990");
+  it("暦に無い出生日は台帳に入らない＝預かる出生データも常に実在日", async () => {
+    for (const date of INVALID) {
+      expect((await call("save_chart", { ...BIRTH, ...date })).isError).toBe(true);
+    }
+    expect((await call("list_charts")).structuredContent.charts).toEqual([]);
   });
 
   it("lunar_return / solar_return は日を取らない（月初 1 日固定なので暦の穴が無い）", async () => {
@@ -1968,12 +2329,20 @@ describe("chart_id の衝突回避", () => {
  * 更新履歴:
  * - 2026-08-22 図の中のアスペクト追加で更新（transit / lunar_return / solar_return の 3 本だけ。
  *   description に項目が 1 つ増え、inputSchema に orb が生えた。残り 8 本は 1 文字も動かしていない）
+ * - 2026-08-22 出生データを台帳で預かる改定で更新（save_chart / list_charts / get_chart /
+ *   delete_chart の description と、progressions（chart_id を取るようになり required も付いた）。
+ *   transit 系・リターン・yearly_overview・transit_events・update_default_location は動かしていない）
+ * - 2026-08-22 calculate_numerology（12 本目）を末尾に追加で更新
+ *   （既存 11 本は 1 文字も動かしていない）
+ * - 2026-08-22 calculate_numerology を chart_id / 生年月日の直接指定の両受けにして更新
+ *   （公開層から移してきたぶん。title・description と、year / month / day の 3 引数が増え、
+ *   required が外れた。既存 11 本は 1 文字も動かしていない）
  */
 const FROZEN_ASTRO_TOOLS = [
   {
     "name": "save_chart",
     "title": "出生図を登録する",
-    "description": "出生データからネイタルチャート（出生図）を計算し、chart_id を付けて保存する。以後は chart_id だけでトランジットなどを引ける。\n**保存されるのは計算結果の座標だけ**——天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・ハウス方式のみで、出生日時と出生地は計算に使ったあと捨てる（サーバーに残らない）。そのぶん、ハウス方式を変えて計算し直したいときは、もう一度このツールを呼ぶ必要がある。\n日時は**出生地の現地時刻**で渡し、utc_offset にその土地の時差を書く（日本は 9）。緯度・経度は北緯・東経が正、南緯・西経が負。\ndefault_lat / default_lng は「いつもの場所」（現在の居住地など）で、後々のリターン計算で使う。分からなければ省略してよい。",
+    "description": "出生データからネイタルチャート（出生図）を計算し、chart_id を付けて保存する。以後は chart_id だけでトランジットなどを引ける。\n保存されるのは計算結果の座標（天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・ハウス方式）と、**渡された出生データそのもの**（年月日・時刻・時差・緯度経度）。出生データは誕生日から引く占術と progressions のために預かるもので、この鍵の台帳にだけ入り、**どのツールの返事にも出さない**（delete_chart で消える）。\nハウス方式を変えて計算し直したいときは、delete_chart で消してからもう一度このツールを呼ぶ（同じ chart_id への上書き登録は無い）。\n日時は**出生地の現地時刻**で渡し、utc_offset にその土地の時差を書く（日本は 9）。緯度・経度は北緯・東経が正、南緯・西経が負。\ndefault_lat / default_lng は「いつもの場所」（現在の居住地など）で、後々のリターン計算で使う。分からなければ省略してよい。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2077,7 +2446,7 @@ const FROZEN_ASTRO_TOOLS = [
   {
     "name": "list_charts",
     "title": "登録済みチャートの一覧",
-    "description": "この URL に登録されているチャートの一覧を返す（chart_id・ラベル・ハウス方式・「いつもの場所」・登録日時）。transit を呼ぶ前に chart_id を確かめたいときに使う。",
+    "description": "この URL に登録されているチャートの一覧を返す（chart_id・ラベル・ハウス方式・「いつもの場所」・出生データを預かっているか・登録日時）。transit を呼ぶ前に chart_id を確かめたいときに使う。出生データは「あり / なし」だけを返し、値そのものは出さない。",
     "inputSchema": {
       "type": "object",
       "properties": {},
@@ -2091,7 +2460,7 @@ const FROZEN_ASTRO_TOOLS = [
   {
     "name": "get_chart",
     "title": "出生図を読み直す",
-    "description": "save_chart で登録したネイタルチャート（出生図）を chart_id から読み直す。返るのは (1) ネイタル天体の星座・度数・逆行と在ハウス、(2) ASC / MC とハウスカスプ、(3) **出生図の中のアスペクト**（ネイタル内アスペクト。10 天体＋ASC / MC の総当たり、メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション）。\n保存済みの座標を読むだけで計算し直さないので、ハウス方式を変えたいときは save_chart で登録し直すこと（出生日時・出生地は保存していない）。\nネイタルの読み直し・出生図そのものを話題にするときはこれ（transit は「今の空」用）。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "description": "save_chart で登録したネイタルチャート（出生図）を chart_id から読み直す。返るのは (1) ネイタル天体の星座・度数・逆行と在ハウス、(2) ASC / MC とハウスカスプ、(3) **出生図の中のアスペクト**（ネイタル内アスペクト。10 天体＋ASC / MC の総当たり、メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション）。\n保存済みの座標を読むだけで計算し直さないので、ハウス方式を変えたいときは delete_chart してから save_chart で登録し直すこと。預かっている出生データはここには出さない（値を読み戻す口は無い）。\nネイタルの読み直し・出生図そのものを話題にするときはこれ（transit は「今の空」用）。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2119,7 +2488,7 @@ const FROZEN_ASTRO_TOOLS = [
   {
     "name": "delete_chart",
     "title": "登録済みチャートを消す",
-    "description": "chart_id を指定して登録を取り消す。消したチャートは戻せない（出生日時・出生地を保存していないため、サーバー側で再計算できない）。",
+    "description": "chart_id を指定して登録を取り消す。計算済みの座標も、預かっている出生データも一緒に消える（戻せないので、必要ならもう一度 save_chart で登録し直すこと）。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2319,10 +2688,14 @@ const FROZEN_ASTRO_TOOLS = [
   {
     "name": "progressions",
     "title": "プログレッション（二次進行）",
-    "description": "二次進行（セカンダリー・プログレッション／一日一年法）を計算する。出生の翌日の空を1歳、翌々日を2歳と読む技法で、進行天体・進行 ASC / MC と、それらがネイタルに落とすアスペクト（メジャー5種・オーブ 1°）を返す。\n**このツールだけは出生の原本（日時・場所）が要るため、原本をサーバーに預けた本人の URL でしか動かない。**chart_id は取らない——原本から毎回ネイタルを引き直すので、登録済みチャートとの取り違えが起きない。使えない URL では、その旨だけを返す。\nyear / month / day を省略すると今日で計算する。返却テキストに出生日時・出生地そのものは出さない。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "description": "二次進行（セカンダリー・プログレッション／一日一年法）を計算する。出生の翌日の空を1歳、翌々日を2歳と読む技法で、進行天体・進行 ASC / MC と、それらがネイタルに落とすアスペクト（メジャー5種・オーブ 1°）を返す。\nchart_id で呼ぶ。**出生データ（日時・場所）を預かっているチャートが要る**——二次進行は出生の瞬間そのものから毎回ネイタルを引き直すため。出生データを保存しない時代に登録されたチャートでは使えないので、その旨だけを返す（delete_chart して save_chart で登録し直せば使える）。\nyear / month / day を省略すると今日で計算する。返却テキストに出生日時・出生地そのものは出さない。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     "inputSchema": {
       "type": "object",
       "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
         "year": {
           "type": "integer",
           "description": "見たい日の年（month / day とそろえて指定。省略すると今日）"
@@ -2346,6 +2719,9 @@ const FROZEN_ASTRO_TOOLS = [
           "description": "表示に使う時差（時間単位。日本時間なら 9）。日付を省略したときの「今日」もこの時差の土地の暦で決める（省略すると UTC）"
         }
       },
+      "required": [
+        "chart_id"
+      ],
       "additionalProperties": false
     },
     "annotations": {
@@ -2472,6 +2848,76 @@ const FROZEN_ASTRO_TOOLS = [
       "required": [
         "chart_id"
       ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "calculate_numerology",
+    "title": "数秘術（生年月日から）",
+    "description": "生年月日から数秘術（ピタゴラス式）を計算する。**登録済みチャートの chart_id か、生年月日の直接指定（year / month / day）のどちらか一方**で呼ぶ——chart_id なら台帳が預かっている出生データを使うので生年月日を渡し直さなくてよく、直接指定は登録せずに一度だけ見るときに使う。\n数秘術は誕生日を使うので公開のカード層には置いていない。この鍵つきの入口だけにある。\n乱数は使わない——ここでのサーバーの仕事は規約を固定すること。ライフパスは流派（還元の規約）によって同じ生年月日から違う数が出る（1986-12-29 は 11 にも 2 にもなる）ため、単一の答えではなく名前つきの 4 経路と途中式を返す——full_sum=全桁をまとめて足し最後の和でマスターを保持 / component_reduce=年・月・日を 1 桁まで還元してから足す / component_keep=年・月・日を還元するときマスターは保持して足す / no_master=マスターを認めず 1 桁まで還元。\nほかにバースデーナンバー、アティチュードナンバー（サンナンバー＝月＋日）、パーソナルイヤー／マンス／デイ（暦年起点＝1 月 1 日で切り替わる）も返す。名前数秘（表現数・魂数など）・ピナクル・チャレンジは範囲外。\n**出生データそのものは返事に出さない**（直接指定で呼んだときも同じ。生まれた日だけはバースデーナンバーとして数字で出る。年と月は還元したあとの値しか出ない）。chart_id で呼ぶとき、出生データを預かっていないチャート（保存しない時代の登録）では使えないので、その旨だけを返す（delete_chart して save_chart で登録し直せば使える）。\nこのツールは解釈をしない——どの経路で読むかは呼び出した側（あるいは占われる本人の流派）で決めること。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）。year / month / day とはどちらか一方だけを指定する"
+        },
+        "year": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999,
+          "description": "生年月日の年（西暦）。登録せずに一度だけ見るときの直接指定で、year / month / day は 3 つそろえて指定する（chart_id とは併用できない）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "生年月日の月（1-12）"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "生年月日の日（1-31）。暦に存在しない日付（2026-02-31 など）は断る"
+        },
+        "target_year": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999,
+          "description": "パーソナルイヤー／マンス／デイを見る基準日の年。target_year / target_month / target_day は 3 つそろえて指定する。3 つとも省略すると今日で見る。"
+        },
+        "target_month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "基準日の月（1-12）"
+        },
+        "target_day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "基準日の日（1-31）"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "基準日を省いたとき「今日」をどの土地の暦で決めるか（時間単位。日本時間なら 9。省略すると UTC）。target_* を指定したときは使わない"
+        },
+        "masters": {
+          "type": "string",
+          "enum": [
+            "11_22_33",
+            "11_22"
+          ],
+          "default": "11_22_33",
+          "description": "マスターナンバーとして扱う数（既定 11_22_33）。11_22 にすると 33 を認めず 6 まで還元する。"
+        }
+      },
       "additionalProperties": false
     },
     "annotations": {

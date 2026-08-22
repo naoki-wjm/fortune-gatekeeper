@@ -5,14 +5,26 @@
  *   key:<キー文字列>        → { user, name, role }        … 誰の URL か
  *   chart:<user>:<chart_id> → 計算済みチャート             … 何を計算したか
  *
- * ⚠ **原本レス**が背骨。出生日時・出生地は計算に使って捨て、残すのは天体の黄経・速度・
- *    カスプ・ASC/MC といった「もう出てしまった座標」だけ。ここから誕生日は復元できない
- *    （太陽の度数から日付は概ね割れるが、年も時刻も場所も戻らない）。
- *    リターン計算用の「いつもの場所」だけは例外で、本人が明示的に預けたものを持つ。
+ * ⚠ **出生データはこの台帳が預かります**（2026-08-22 改定）。計算済みの座標に加えて、
+ *    出生の年月日・時刻・時差・緯度経度を chart レコードの `birth` に入れて持ちます。
+ *    誕生日系の占術（数秘術・宿曜・四柱推命など）を chart_id から引けるようにするための改めで、
+ *    約束はこの 3 つ:
+ *      - 使えるのはその鍵を持つ人だけ（chart: の前置きで人ごとに仕切ってある）
+ *      - **返事には出さない**。どのツールの返却テキストにも structuredContent にも出生データを載せない
+ *        （呼び出し側は登録時に自分で渡しているので、読み戻す必要がない）
+ *      - delete_chart で座標もろとも消える
+ *    リターン計算用の「いつもの場所」は出生地とは別の覚え書きで、本人が明示的に預けたものです。
+ *    ⚠ 出生データを持たない古い登録（原本を捨てていた時代のもの）もあるので、`birth` は optional。
  */
 import { cryptoRandom, type RandomSource } from "../random";
 
-/** キー台帳の中身 */
+/**
+ * キー台帳の中身。
+ *
+ * ⚠ role は**今のところ挙動を分けていません**（2026-08-22、progressions が chart_id 方式に
+ *    なって owner 特権が無くなったため）。既存の鍵レコードとの互換と、将来の友だちキーの
+ *    ために型と検算だけ残してあります。
+ */
 export type Role = "owner" | "friend";
 
 export interface AuthContext {
@@ -21,7 +33,7 @@ export interface AuthContext {
   role: Role;
 }
 
-/** チャート台帳の中身（保存するのはこれだけ。出生日時・出生地・jd は入れない） */
+/** チャート台帳の中身（計算済みの座標＋預かった出生データ。jd は入れない） */
 export interface StoredChart {
   label: string;
   house_system: string;
@@ -32,6 +44,20 @@ export interface StoredChart {
   ascmc: number[];
   /** リターン・トランジット用の「いつもの場所」（本人が預けた場合のみ） */
   default_location?: { lat: number; lng: number; label?: string };
+  /**
+   * 出生データ（2026-08-22 以降の登録には必ず入ります。それより前の登録には入っていません）。
+   * ⚠ **返事には出さない値**です。表に出すときは publicChart で落としてから返してください。
+   */
+  birth?: {
+    year: number;
+    month: number;
+    day: number;
+    hour: number;
+    minute: number;
+    utc_offset: number;
+    lat: number;
+    lng: number;
+  };
   /** 保存時刻（ISO 8601） */
   created: string;
 }
@@ -42,6 +68,8 @@ export interface ChartSummary {
   label: string;
   house_system: string;
   default_location?: { lat: number; lng: number; label?: string };
+  /** 出生データを預かっているか（値そのものは出さず、あるかないかだけ） */
+  has_birth: boolean;
   created: string;
 }
 
@@ -191,6 +219,7 @@ export async function listCharts(kv: AstroKv, user: string): Promise<ChartSummar
       chart_id: chartId,
       label: chart.label,
       house_system: chart.house_system,
+      has_birth: chart.birth !== undefined,
       created: chart.created,
     };
     if (chart.default_location) summary.default_location = chart.default_location;

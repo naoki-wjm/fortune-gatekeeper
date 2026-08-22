@@ -19,12 +19,6 @@ import { getEngine } from "./astro/engine";
 /** Workers のバインディング。ASTRO_KV は占星術層の台帳（鍵とチャート） */
 export interface Env {
   ASTRO_KV: KVNamespace;
-  /**
-   * 出生の原本（JSON 文字列）。progressions（二次進行）だけがこれを見る。
-   * 本番は `npx wrangler secret put OWNER_NATAL`、ローカルは `.dev.vars`（git 管理外）。
-   * ⚠ **中身をレスポンスにもログにも出さないこと**。
-   */
-  OWNER_NATAL?: string;
 }
 
 /**
@@ -48,7 +42,10 @@ const GUIDE_TEXT = [
   "",
   "引くのはサーバー、読むのは呼び出した側。ここに解釈層はありません。",
   "",
-  "このほかに占星術（ホロスコープ計算）の層が別の入口で動いていますが、そちらは招かれた人だけが使えます。",
+  "この入口は何も預かりません——誕生日を使う占い（数秘術など）は置いていない、というのが線引きです。",
+  "",
+  "このほかに占星術（ホロスコープ計算）と誕生日を使う占いの層が別の入口で動いていますが、" +
+    "そちらは招かれた人だけが使えます。",
   "",
 ].join("\n");
 
@@ -136,12 +133,7 @@ export default {
           );
         }
 
-        return await handleAstroMcpRequest(request, {
-          auth,
-          kv,
-          getEngine,
-          ownerNatal: env?.OWNER_NATAL,
-        });
+        return await handleAstroMcpRequest(request, { auth, kv, getEngine });
       }
 
       if (url.pathname === "/health") {

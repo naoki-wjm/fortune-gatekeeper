@@ -125,6 +125,20 @@ describe("initialize", () => {
     expect(instructions).toContain("意味はあなたの知識で");
   });
 
+  // 公開層には個人データの口を生やさない（誕生日を使う系は鍵つき層だけ、2026-08-22）
+  it("instructions は数秘術に触れない（誕生日を使う占いは公開層に置かない）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 50,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+    const instructions: string = json.result.instructions;
+    expect(instructions).not.toContain("calculate_numerology");
+    expect(instructions).not.toContain("数秘");
+    expect(instructions).not.toContain("生年月日");
+  });
+
   it("知らないバージョンなら既定の 2025-06-18 を返す", async () => {
     const { json } = await post({
       jsonrpc: "2.0",
@@ -1003,8 +1017,12 @@ describe("ルーティング", () => {
     const guide = await response.text();
     expect(guide).toContain("fortune-gatekeeper");
     // ツールの列挙は tools/list と食い違わせない
-    expect(guide).toContain("list_decks, draw_cards, cast_hexagram, roll_astro_dice, cast_geomancy");
+    expect(guide).toContain(
+      "list_decks, draw_cards, cast_hexagram, roll_astro_dice, cast_geomancy",
+    );
     expect(guide).toContain("ジオマンシー");
+    // 数秘術は鍵つき側なので、案内文でも「ここには無い」としか言わない
+    expect(guide).toContain("誕生日を使う占い（数秘術など）は置いていない");
   });
 
   it("GET /health は ok", async () => {
@@ -1040,6 +1058,10 @@ describe("ルーティング", () => {
  *   2026-08-22 nakko 追加で更新（cast_hexagram の description に 2 段落と、
  *              nakko / year / month / day / hour / minute / utc_offset の 7 引数が増えた。
  *              ほかの 4 本は 1 文字も変えていない）
+ *   2026-08-22 calculate_numerology 追加で更新（既存 5 本の定義は 1 文字も変えていない）
+ *   2026-08-22 calculate_numerology を削除して 5 本に戻した ―― 数秘は鍵つき層へ移した
+ *              （公開層には個人データの口を生やさない、という線引き。
+ *              残り 5 本の定義は 1 文字も変えていない）
  */
 const FROZEN_TOOLS = [
   {

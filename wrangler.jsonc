@@ -33,9 +33,6 @@
       "id": "7a7079626493440493fb718744511d80"
     }
   ],
-  // 出生の原本（progressions＝二次進行だけが読む）は Secret で渡す。設定ファイルには書かない。
-  // ⚠ デプロイ時に `npx wrangler secret put OWNER_NATAL` で原本（JSON 1 行）を入れること。
-  //    ローカル dev は .dev.vars（git 管理外）の OWNER_NATAL を読む。
   "dev": {
     // 8788 は vault-gatekeeper が使うので 8789 を借りる
     "port": 8789

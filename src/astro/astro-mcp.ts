@@ -4,7 +4,8 @@
  * カード層（src/mcp.ts）と同じ流儀 ―― ステートレスな Streamable HTTP、JSON-RPC 2.0 単発、
  * ツールの失敗は isError。違うのは 2 点だけ:
  *   - URL の鍵で人を見分ける（誰の chart_id か、を分けるためだけの仕切り）
- *   - KV に「計算済みのチャート」を置く（**出生日時・出生地は保存しない**）
+ *   - KV に「計算済みのチャート」と、預かった出生データを置く
+ *     （**出生データは返事に出さない** ―― 表に出すときは publicChart で落とす）
  *
  * ここも解釈層を持たない。返すのは座標と角度で、読むのは会話中の Claude。
  * wasm には触らない（エンジンは `getEngine` として外から注入される）＝ Node のテストでも回る。
@@ -50,6 +51,15 @@ import {
   type SwissEph,
 } from "./chart";
 import {
+  DEFAULT_MASTERS,
+  MASTERS_OPTIONS,
+  NumerologyError,
+  calculateNumerology,
+  formatNumerologyText,
+  type MastersOption,
+  type NumerologyResult,
+} from "../numerology";
+import {
   BODY_SET_LABEL,
   MAX_DAYS,
   TICK_MINUTES,
@@ -88,9 +98,10 @@ const ASTRO_INSTRUCTIONS =
   "座標と角度だけで、解釈は一切しません。読み解きはあなた自身の知識で行ってください。" +
   "自分で「計算したふり」をせず、天体の位置が要る場面では必ずこのツールを呼ぶこと。\n" +
   "チャートは save_chart で一度登録すると chart_id で何度でも呼び出せます。" +
-  "保存されるのは計算済みの座標（天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・ハウス方式）だけで、" +
-  "**出生日時と出生地は計算に使ったあと捨てます**。" +
-  "そのためハウス方式を変えて引き直したいときは、もう一度 save_chart を呼んでもらう必要があります。\n" +
+  "保存されるのは計算済みの座標（天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・ハウス方式）で、" +
+  "**出生データ（日時・時差・緯度経度）も計算済みの座標と一緒にこの鍵の台帳に預かります**" +
+  "（鍵を持つ人だけが使え、delete_chart で消えます。返事には出生データそのものは出しません）。" +
+  "ハウス方式を変えたいときは delete_chart して save_chart で登録し直してください。\n" +
   "使い分け: save_chart=出生データを登録して chart_id を得る / list_charts=登録済みの一覧 / " +
   "get_chart=登録済みの出生図を読み直す（天体・ASC/MC・カスプ・出生図の中のアスペクト。" +
   "transit は今の空、こちらは生まれたときの空） / " +
@@ -108,8 +119,13 @@ const ASTRO_INSTRUCTIONS =
   "「今日だけの配置か、数週間続く背景か、次に動くのはいつか」を見るならこれ） / " +
   "transit_events=期間内（既定は今日から 7 日）のアスペクトの entering・exact・leaving、留、" +
   "イングレスを分単位の時刻つきで時系列に" +
-  "（「今週 exact になるのは」「明日いちばんタイトな時間帯は」はこれ）。" +
-  "progressions だけは出生の原本が要るため、原本を預けた本人の URL でしか動きません。";
+  "（「今週 exact になるのは」「明日いちばんタイトな時間帯は」はこれ）/ " +
+  "calculate_numerology=数秘術" +
+  "（ライフパス 4 経路・バースデー・アティチュード・パーソナルイヤー／マンス／デイ）。" +
+  "chart_id か生年月日の直接指定（year / month / day）のどちらかで呼べます" +
+  "（登録せずに一度だけ見るときは直接指定を使ってください）。" +
+  "数秘術は誕生日を使うので公開のカード層には無く、この鍵つきの入口だけにあります。\n" +
+  "progressions も chart_id で呼べます（出生データを預かっているチャートが要ります）。";
 
 // ---------------------------------------------------------------------------
 // ツール定義
@@ -126,9 +142,12 @@ export const ASTRO_TOOLS = [
     description:
       "出生データからネイタルチャート（出生図）を計算し、chart_id を付けて保存する。" +
       "以後は chart_id だけでトランジットなどを引ける。\n" +
-      "**保存されるのは計算結果の座標だけ**——天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・" +
-      "ハウス方式のみで、出生日時と出生地は計算に使ったあと捨てる（サーバーに残らない）。" +
-      "そのぶん、ハウス方式を変えて計算し直したいときは、もう一度このツールを呼ぶ必要がある。\n" +
+      "保存されるのは計算結果の座標（天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・ハウス方式）と、" +
+      "**渡された出生データそのもの**（年月日・時刻・時差・緯度経度）。" +
+      "出生データは誕生日から引く占術と progressions のために預かるもので、" +
+      "この鍵の台帳にだけ入り、**どのツールの返事にも出さない**（delete_chart で消える）。\n" +
+      "ハウス方式を変えて計算し直したいときは、delete_chart で消してからもう一度このツールを呼ぶ" +
+      "（同じ chart_id への上書き登録は無い）。\n" +
       "日時は**出生地の現地時刻**で渡し、utc_offset にその土地の時差を書く（日本は 9）。" +
       "緯度・経度は北緯・東経が正、南緯・西経が負。\n" +
       "default_lat / default_lng は「いつもの場所」（現在の居住地など）で、" +
@@ -202,7 +221,9 @@ export const ASTRO_TOOLS = [
     title: "登録済みチャートの一覧",
     description:
       "この URL に登録されているチャートの一覧を返す（chart_id・ラベル・ハウス方式・" +
-      "「いつもの場所」・登録日時）。transit を呼ぶ前に chart_id を確かめたいときに使う。",
+      "「いつもの場所」・出生データを預かっているか・登録日時）。" +
+      "transit を呼ぶ前に chart_id を確かめたいときに使う。" +
+      "出生データは「あり / なし」だけを返し、値そのものは出さない。",
     inputSchema: {
       type: "object",
       properties: {},
@@ -219,7 +240,8 @@ export const ASTRO_TOOLS = [
       "(3) **出生図の中のアスペクト**（ネイタル内アスペクト。10 天体＋ASC / MC の総当たり、" +
       "メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション）。\n" +
       "保存済みの座標を読むだけで計算し直さないので、ハウス方式を変えたいときは " +
-      "save_chart で登録し直すこと（出生日時・出生地は保存していない）。\n" +
+      "delete_chart してから save_chart で登録し直すこと。" +
+      "預かっている出生データはここには出さない（値を読み戻す口は無い）。\n" +
       "ネイタルの読み直し・出生図そのものを話題にするときはこれ（transit は「今の空」用）。\n" +
       "このツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     inputSchema: {
@@ -247,8 +269,8 @@ export const ASTRO_TOOLS = [
     name: "delete_chart",
     title: "登録済みチャートを消す",
     description:
-      "chart_id を指定して登録を取り消す。消したチャートは戻せない" +
-      "（出生日時・出生地を保存していないため、サーバー側で再計算できない）。",
+      "chart_id を指定して登録を取り消す。計算済みの座標も、預かっている出生データも" +
+      "一緒に消える（戻せないので、必要ならもう一度 save_chart で登録し直すこと）。",
     inputSchema: {
       type: "object",
       properties: {
@@ -465,14 +487,19 @@ export const ASTRO_TOOLS = [
       "二次進行（セカンダリー・プログレッション／一日一年法）を計算する。" +
       "出生の翌日の空を1歳、翌々日を2歳と読む技法で、進行天体・進行 ASC / MC と、" +
       "それらがネイタルに落とすアスペクト（メジャー5種・オーブ 1°）を返す。\n" +
-      "**このツールだけは出生の原本（日時・場所）が要るため、原本をサーバーに預けた本人の URL でしか動かない。**" +
-      "chart_id は取らない——原本から毎回ネイタルを引き直すので、登録済みチャートとの取り違えが起きない。" +
-      "使えない URL では、その旨だけを返す。\n" +
+      "chart_id で呼ぶ。**出生データ（日時・場所）を預かっているチャートが要る**——" +
+      "二次進行は出生の瞬間そのものから毎回ネイタルを引き直すため。" +
+      "出生データを保存しない時代に登録されたチャートでは使えないので、その旨だけを返す" +
+      "（delete_chart して save_chart で登録し直せば使える）。\n" +
       "year / month / day を省略すると今日で計算する。返却テキストに出生日時・出生地そのものは出さない。\n" +
       "このツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     inputSchema: {
       type: "object",
       properties: {
+        chart_id: {
+          type: "string",
+          description: "対象のチャート ID（list_charts で確認できる）",
+        },
         year: {
           type: "integer",
           description: "見たい日の年（month / day とそろえて指定。省略すると今日）",
@@ -488,6 +515,7 @@ export const ASTRO_TOOLS = [
             "この時差の土地の暦で決める（省略すると UTC）",
         },
       },
+      required: ["chart_id"],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -627,6 +655,103 @@ export const ASTRO_TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "calculate_numerology",
+    title: "数秘術（生年月日から）",
+    description:
+      "生年月日から数秘術（ピタゴラス式）を計算する。" +
+      "**登録済みチャートの chart_id か、生年月日の直接指定（year / month / day）のどちらか一方**で呼ぶ" +
+      "——chart_id なら台帳が預かっている出生データを使うので生年月日を渡し直さなくてよく、" +
+      "直接指定は登録せずに一度だけ見るときに使う。\n" +
+      "数秘術は誕生日を使うので公開のカード層には置いていない。この鍵つきの入口だけにある。\n" +
+      "乱数は使わない——ここでのサーバーの仕事は規約を固定すること。" +
+      "ライフパスは流派（還元の規約）によって同じ生年月日から違う数が出る" +
+      "（1986-12-29 は 11 にも 2 にもなる）ため、単一の答えではなく" +
+      "名前つきの 4 経路と途中式を返す——" +
+      "full_sum=全桁をまとめて足し最後の和でマスターを保持 / " +
+      "component_reduce=年・月・日を 1 桁まで還元してから足す / " +
+      "component_keep=年・月・日を還元するときマスターは保持して足す / " +
+      "no_master=マスターを認めず 1 桁まで還元。\n" +
+      "ほかにバースデーナンバー、アティチュードナンバー（サンナンバー＝月＋日）、" +
+      "パーソナルイヤー／マンス／デイ（暦年起点＝1 月 1 日で切り替わる）も返す。" +
+      "名前数秘（表現数・魂数など）・ピナクル・チャレンジは範囲外。\n" +
+      "**出生データそのものは返事に出さない**（直接指定で呼んだときも同じ。" +
+      "生まれた日だけはバースデーナンバーとして数字で出る。年と月は還元したあとの値しか出ない）。" +
+      "chart_id で呼ぶとき、出生データを預かっていないチャート（保存しない時代の登録）では使えないので、" +
+      "その旨だけを返す（delete_chart して save_chart で登録し直せば使える）。\n" +
+      "このツールは解釈をしない——どの経路で読むかは呼び出した側" +
+      "（あるいは占われる本人の流派）で決めること。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chart_id: {
+          type: "string",
+          description:
+            "対象のチャート ID（list_charts で確認できる）。" +
+            "year / month / day とはどちらか一方だけを指定する",
+        },
+        year: {
+          type: "integer",
+          minimum: 1,
+          maximum: 9999,
+          description:
+            "生年月日の年（西暦）。登録せずに一度だけ見るときの直接指定で、" +
+            "year / month / day は 3 つそろえて指定する（chart_id とは併用できない）",
+        },
+        month: {
+          type: "integer",
+          minimum: 1,
+          maximum: 12,
+          description: "生年月日の月（1-12）",
+        },
+        day: {
+          type: "integer",
+          minimum: 1,
+          maximum: 31,
+          description: "生年月日の日（1-31）。暦に存在しない日付（2026-02-31 など）は断る",
+        },
+        target_year: {
+          type: "integer",
+          minimum: 1,
+          maximum: 9999,
+          description:
+            "パーソナルイヤー／マンス／デイを見る基準日の年。" +
+            "target_year / target_month / target_day は 3 つそろえて指定する。" +
+            "3 つとも省略すると今日で見る。",
+        },
+        target_month: {
+          type: "integer",
+          minimum: 1,
+          maximum: 12,
+          description: "基準日の月（1-12）",
+        },
+        target_day: {
+          type: "integer",
+          minimum: 1,
+          maximum: 31,
+          description: "基準日の日（1-31）",
+        },
+        utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          description:
+            "基準日を省いたとき「今日」をどの土地の暦で決めるか（時間単位。日本時間なら 9。" +
+            "省略すると UTC）。target_* を指定したときは使わない",
+        },
+        masters: {
+          type: "string",
+          enum: MASTERS_OPTIONS,
+          default: DEFAULT_MASTERS,
+          description:
+            "マスターナンバーとして扱う数（既定 11_22_33）。" +
+            "11_22 にすると 33 を認めず 6 まで還元する。",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -735,6 +860,17 @@ function requireBodySet(args: Record<string, unknown>): BodySet {
   return value as BodySet;
 }
 
+/** calculate_numerology の masters（マスターナンバーの規約）。既定は 11_22_33 */
+function requireMasters(args: Record<string, unknown>): MastersOption {
+  const value = optionalString(args, "masters", 16) ?? DEFAULT_MASTERS;
+  if (!MASTERS_OPTIONS.includes(value as MastersOption)) {
+    throw new AstroError(
+      `masters は ${MASTERS_OPTIONS.join(" / ")} のどちらかです: ${value}`,
+    );
+  }
+  return value as MastersOption;
+}
+
 function requireHouseSystem(args: Record<string, unknown>): string {
   const value = optionalString(args, "house_system", 4) ?? "P";
   if (!HOUSE_SYSTEM_CODES.includes(value)) {
@@ -778,7 +914,7 @@ function isCalendarDay(year: number, month: number, day: number): boolean {
  * 日の範囲（1〜31）だけでは 2026-02-31 が通ってしまい、`swe_julday` はそれを黙って
  * 3 月 3 日に繰り上げる ―― 打ち間違いが「別の日の図」として静かに返ってくるのが困る。
  * ⚠ 呼ぶ相手を選ぶこと: **利用者が渡した引数**にだけ使う（メッセージに日付が出る）。
- *    OWNER_NATAL のような預かりものは値を出さない言い方で断る（parseOwnerNatal 参照）。
+ *    台帳に預かっている出生データには使わない（値を出さない言い方で断る）。
  */
 function assertCalendarDay(year: number, month: number, day: number): void {
   if (isCalendarDay(year, month, day)) return;
@@ -886,12 +1022,18 @@ export interface AstroContext {
   getEngine: () => Promise<SwissEph>;
   /** テストから時刻を固定するための差し込み口（既定は現在時刻） */
   now?: () => Date;
-  /**
-   * 出生の原本（Workers Secret の OWNER_NATAL。JSON 文字列）。
-   * progressions だけがこれを見る。**中身も存在有無も、返事やログには出さない**
-   * （「設定されていません」以上のことを言わない）。
-   */
-  ownerNatal?: string;
+}
+
+/**
+ * 台帳のチャートから、表に出してよい部分だけを取り出す。
+ *
+ * 落とすのは `birth`（預かっている出生データ）ひとつ ―― structuredContent に
+ * `...stored` を撒くところは必ずこれを通すこと。**出生データは返事に出さない**が約束で、
+ * 呼び出し側は登録時に自分で渡しているので読み戻す必要もない。
+ */
+function publicChart(chart: StoredChart): Omit<StoredChart, "birth"> {
+  const { birth: _birth, ...rest } = chart;
+  return rest;
 }
 
 async function engineOf(context: AstroContext): Promise<SwissEph> {
@@ -978,6 +1120,17 @@ async function runSaveChart(rawArguments: unknown, context: AstroContext): Promi
     planets: computed.planets,
     cusps: computed.cusps,
     ascmc: computed.ascmc,
+    // 出生データはこの台帳が預かる（返事には出さない。publicChart で落としてから返す）
+    birth: {
+      year: moment.year,
+      month: moment.month,
+      day: moment.day,
+      hour: moment.hour,
+      minute: moment.minute,
+      utc_offset: moment.utcOffset,
+      lat,
+      lng,
+    },
     created: new Date().toISOString(),
   };
   if (defaultLat !== undefined && defaultLng !== undefined) {
@@ -1009,11 +1162,13 @@ async function runSaveChart(rawArguments: unknown, context: AstroContext): Promi
   lines.push("■ ハウスカスプ");
   lines.push(formatCuspLine(stored.cusps));
   lines.push("");
-  lines.push("出生日時・出生地は保存していません（計算に使って捨てました）。");
+  lines.push(
+    "出生データ（日時・時差・緯度経度）はこのチャートに預かりました。返事には出しません。delete_chart で消えます。",
+  );
 
   return {
     content: [{ type: "text", text: lines.join("\n") }],
-    structuredContent: { chart_id: chartId, ...stored },
+    structuredContent: { chart_id: chartId, ...publicChart(stored) },
   };
 }
 
@@ -1029,7 +1184,8 @@ async function runListCharts(context: AstroContext): Promise<ToolResult> {
             "保存済みのチャートはまだありません。\n" +
             "save_chart に出生データ（年月日・時刻・その土地の時差・緯度経度）を渡すと chart_id が発行され、" +
             "以後はその ID だけでトランジットを引けます。" +
-            "出生日時・出生地はサーバーに残らず、計算済みの座標だけが保存されます。",
+            "出生データは計算済みの座標と一緒にこの鍵の台帳に預かります" +
+            "（鍵を持つ人だけが使え、返事には出さず、delete_chart で消えます）。",
         },
       ],
       structuredContent: { charts },
@@ -1047,6 +1203,12 @@ async function runListCharts(context: AstroContext): Promise<ToolResult> {
       const name = place.label ? `${place.label}（${place.lat}, ${place.lng}）` : `${place.lat}, ${place.lng}`;
       parts.push(`いつもの場所: ${name}`);
     }
+    // 値そのものは出さず、あるかないかだけ（無ければ progressions などが使えない）
+    parts.push(
+      chart.has_birth
+        ? "出生データ: あり"
+        : "出生データ: なし（登録し直すと progressions などが使えます）",
+    );
     parts.push(`登録 ${chart.created}`);
     lines.push(parts.join(" / "));
   }
@@ -1150,18 +1312,24 @@ async function runDeleteChart(rawArguments: unknown, context: AstroContext): Pro
     );
   }
 
+  // 出生データを預かっていた図だけ、それも消えたと言い添える（無かった図に言うと嘘になる）
+  const removedBirth = existing.birth !== undefined;
+  const text =
+    `チャート ${chartId}（${existing.label}）を削除しました。` +
+    (removedBirth ? "預かっていた出生データも一緒に消えました。" : "");
+
   return {
-    content: [{ type: "text", text: `チャート ${chartId}（${existing.label}）を削除しました。` }],
-    structuredContent: { chart_id: chartId, deleted: true },
+    content: [{ type: "text", text }],
+    structuredContent: { chart_id: chartId, deleted: true, birth_removed: removedBirth },
   };
 }
 
 /**
  * 「いつもの場所」だけの差し替え。
  *
- * 出生データと無関係な覚え書きなので、原本レス設計と衝突しない ―― 計算済みの座標
- * （planets / cusps / ascmc）にも label / house_system / created にも触らず、
- * default_location だけを置き換える（または消す）。再計算も要らない。
+ * 出生地とは別の覚え書きなので、出生データにも計算済みの座標（planets / cusps / ascmc）にも
+ * label / house_system / created にも触らず、default_location だけを置き換える（または消す）。
+ * 再計算も要らない。
  */
 async function runUpdateDefaultLocation(
   rawArguments: unknown,
@@ -1621,97 +1789,42 @@ async function runReturn(
 }
 
 // ---------------------------------------------------------------------------
-// 二次進行（オーナー特権）
+// 二次進行
 // ---------------------------------------------------------------------------
 
-/** Secret から読んだ出生の原本 */
-interface OwnerNatal {
-  user: string;
-  moment: MomentInput;
-  lat: number;
-  lng: number;
-  houseSystem: string;
-}
-
-/** 原本が読めなかったときの言い分（中身についてはこれ以上言わない） */
-const BROKEN_NATAL =
-  "預かっている出生の原本を読み取れませんでした（OWNER_NATAL の形式を確かめてください）。";
-
 /**
- * Workers Secret の OWNER_NATAL（JSON 文字列）を読む。
- * **中身も、どこがどう違うかも返事に出さない** ―― 出すのは「無い」か「読めない」かだけ。
+ * 二次進行（一日一年法）。
+ *
+ * ほかのツールと違って**出生の瞬間そのもの**が要る ―― 計算済みの座標からは逆算できないため、
+ * 台帳に預かっている出生データ（`birth`）を使う。出生データを持たない古い登録では使えないので、
+ * その場合は値に触れずに「登録し直してください」とだけ返す。
  */
-function parseOwnerNatal(raw: string | undefined): OwnerNatal {
-  if (raw === undefined || raw.trim().length === 0) {
-    throw new AstroError(
-      "このサーバーに出生の原本が預けられていないため、二次進行は計算できません。" +
-        "デプロイ時に `npx wrangler secret put OWNER_NATAL` で原本を登録してください。",
-    );
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new AstroError(BROKEN_NATAL);
-  }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new AstroError(BROKEN_NATAL);
-  }
-  const record = parsed as Record<string, unknown>;
-  const user = record["user"];
-  if (typeof user !== "string" || user.length === 0) throw new AstroError(BROKEN_NATAL);
-
-  let natal: OwnerNatal;
-  try {
-    const houseSystem = optionalString(record, "house_system", 4) ?? "P";
-    if (!HOUSE_SYSTEM_CODES.includes(houseSystem)) throw new AstroError(BROKEN_NATAL);
-    natal = {
-      user,
-      moment: {
-        year: requireInteger(record, "year", -5000, 5000),
-        month: requireInteger(record, "month", 1, 12),
-        day: requireInteger(record, "day", 1, 31),
-        hour: requireInteger(record, "hour", 0, 23),
-        minute: requireInteger(record, "minute", 0, 59),
-        utcOffset: requireNumber(record, "utc_offset", -14, 14),
-      },
-      lat: requireNumber(record, "lat", -90, 90),
-      lng: requireNumber(record, "lng", -180, 180),
-      houseSystem,
-    };
-  } catch {
-    // 検算器のメッセージ（「year は必須です」など）は原本の形を漏らすので、ここで丸める
-    throw new AstroError(BROKEN_NATAL);
-  }
-
-  // 暦に無い日（2 月 31 日など）も断るが、**日付そのものは書かない**（原本が漏れる）
-  if (!isCalendarDay(natal.moment.year, natal.moment.month, natal.moment.day)) {
-    throw new AstroError(
-      "OWNER_NATAL の日付が暦に存在しません（原本の年月日を確かめてください）。",
-    );
-  }
-  return natal;
-}
-
 async function runProgressions(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
   const args = argsOf(rawArguments);
+  const chartId = requireString(args, "chart_id", 32);
 
-  // 門番は 3 枚 ―― (1) 鍵の役どころ (2) 原本が預けられているか (3) 原本の持ち主とこの URL の主が同じか
-  if (context.auth.role !== "owner") {
+  const chart = await getChart(context.kv, context.auth.user, chartId);
+  if (!chart) {
     return toolError(
-      "この機能は出生原本を預けた本人専用です。" +
-        "二次進行は出生の日時と場所そのものが要るため、預かっている原本でしか計算できません。" +
-        "transit / lunar_return / solar_return は chart_id があればお使いいただけます。",
+      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
+        "save_chart で登録してください。",
     );
   }
-  const natal = parseOwnerNatal(context.ownerNatal);
-  if (natal.user !== context.auth.user) {
+  const birth = chart.birth;
+  if (!birth) {
     return toolError(
-      "この URL は出生原本の持ち主のものではありません。" +
-        "progressions は原本を預けた本人だけが使えます。",
+      "このチャートには出生データが入っていません（出生データを保存しない時代の登録です）。" +
+        "delete_chart で消して save_chart で登録し直すと使えます。",
     );
   }
+  const natalMoment: MomentInput = {
+    year: birth.year,
+    month: birth.month,
+    day: birth.day,
+    hour: birth.hour,
+    minute: birth.minute,
+    utcOffset: birth.utc_offset,
+  };
 
   const utcOffset = optionalNumber(args, "utc_offset", -14, 14);
   const year = optionalInteger(args, "year", -5000, 5000);
@@ -1740,10 +1853,10 @@ async function runProgressions(rawArguments: unknown, context: AstroContext): Pr
 
   const swe = await engineOf(context);
   const result = computeProgression(swe, {
-    natal: natal.moment,
-    lat: natal.lat,
-    lng: natal.lng,
-    houseSystem: natal.houseSystem,
+    natal: natalMoment,
+    lat: birth.lat,
+    lng: birth.lng,
+    houseSystem: chart.house_system,
     target,
   });
 
@@ -1763,8 +1876,9 @@ async function runProgressions(rawArguments: unknown, context: AstroContext): Pr
 
   const lines: string[] = [
     "プログレッション（二次進行・一日一年法）",
+    `チャート: ${chart.label}（${chartId}）`,
     `対象日: ${dateLabel}${calendarNote} / ${formatAge(result.ageYears)}`,
-    `ハウス方式: ${houseSystemName(natal.houseSystem)}（${natal.houseSystem}） / ソーラーアーク ${formatArc(result.solarArc)}`,
+    `ハウス方式: ${houseSystemName(chart.house_system)}（${chart.house_system}） / ソーラーアーク ${formatArc(result.solarArc)}`,
     "（P.＝進行天体 / N.＝ネイタル。出生の日時・場所そのものはここには出しません）",
     "",
     "■ 進行天体（カッコ内は出生図のカスプで見た在ハウス）",
@@ -1800,12 +1914,14 @@ async function runProgressions(rawArguments: unknown, context: AstroContext): Pr
   return {
     content: [{ type: "text", text: lines.join("\n") }],
     structuredContent: {
-      // jd（＝出生の瞬間そのもの）は載せない。載せると原本が復元できてしまう
+      // jd（＝出生の瞬間そのもの）は載せない。預かっている出生データは返事に出さないため
+      chart_id: chartId,
+      label: chart.label,
       target_date: dateLabel,
       is_today: isToday,
       age_years: result.ageYears,
       age_label: formatAge(result.ageYears),
-      house_system: natal.houseSystem,
+      house_system: chart.house_system,
       solar_arc: result.solarArc,
       progressed_planets: result.progressedPlanets.map((planet) =>
         describe(planet, result.natalChart.cusps),
@@ -1828,6 +1944,177 @@ async function runProgressions(rawArguments: unknown, context: AstroContext): Pr
       },
       aspects,
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 数秘術（誕生日から引く占術の 1 本目）
+// ---------------------------------------------------------------------------
+
+/** 数秘術に渡す生年月日と、その出どころ（返事の見出しと印に使う） */
+interface NumerologyBirth {
+  year: number;
+  month: number;
+  day: number;
+  /** chart=台帳が預かっているぶん / direct=呼び出しで直接指定されたぶん */
+  source: "chart" | "direct";
+  /** source が chart のときだけ入る */
+  chartId?: string;
+  label?: string;
+}
+
+/**
+ * 生年月日をどこから取るかを決める。
+ *
+ * **chart_id か year / month / day のどちらか一方**で、両方来たら断る（どちらを見るか勝手に決めない）。
+ * 直接指定のときだけ暦の検算をここでする ―― 呼び出した側が打った値なので日付を出して断ってよい。
+ * 預かっているぶんは登録時に検算済みで、こちらは値を返事に出さない約束がある。
+ *
+ * 見つからない・出生データが無いといった「断り」は toolError をそのまま包んで返す
+ * （呼び出し側で `"error" in …` を見て素通しする）。
+ */
+async function resolveNumerologyBirth(
+  args: Record<string, unknown>,
+  context: AstroContext,
+): Promise<NumerologyBirth | { error: ToolResult }> {
+  const chartId = optionalString(args, "chart_id", 32);
+  const year = optionalInteger(args, "year", 1, 9999);
+  const month = optionalInteger(args, "month", 1, 12);
+  const day = optionalInteger(args, "day", 1, 31);
+  const givenBirth = [year, month, day].filter((value) => value !== undefined).length;
+
+  if (chartId !== undefined && givenBirth > 0) {
+    throw new AstroError(
+      "chart_id と生年月日（year / month / day）は、どちらか一方にしてください" +
+        "（登録済みのチャートから引くなら chart_id、登録せずに一度だけ見るなら生年月日）",
+    );
+  }
+
+  if (chartId === undefined) {
+    if (givenBirth === 0) {
+      throw new AstroError(
+        "chart_id か year / month / day を指定してください" +
+          "（登録済みのチャートから引くなら chart_id、登録せずに一度だけ見るなら生年月日）",
+      );
+    }
+    if (givenBirth !== 3) {
+      throw new AstroError(
+        "生年月日は year / month / day の 3 つをそろえて指定してください",
+      );
+    }
+    assertCalendarDay(year as number, month as number, day as number);
+    return {
+      year: year as number,
+      month: month as number,
+      day: day as number,
+      source: "direct",
+    };
+  }
+
+  const chart = await getChart(context.kv, context.auth.user, chartId);
+  if (!chart) {
+    return {
+      error: toolError(
+        `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
+          "save_chart で登録してください。",
+      ),
+    };
+  }
+  const birth = chart.birth;
+  if (!birth) {
+    return {
+      error: toolError(
+        "このチャートには出生データが入っていません（出生データを保存しない時代の登録です）。" +
+          "delete_chart で消して save_chart で登録し直すと使えます。",
+      ),
+    };
+  }
+  return {
+    year: birth.year,
+    month: birth.month,
+    day: birth.day,
+    source: "chart",
+    chartId,
+    label: chart.label,
+  };
+}
+
+/**
+ * 数秘術を計算する（誕生日から引く占術の 1 本目）。
+ *
+ * 算法は純関数（src/numerology.ts）で、ここがやるのは**生年月日の出どころ**を決めることだけ ――
+ * 台帳が預かっている出生データ（chart_id）か、呼び出しでの直接指定（year / month / day）。
+ * 出生データを返事に出さない約束はどちらでも同じで、途中式に出るのは
+ * 還元したあとの値と「生まれた日」（＝バースデーナンバー）だけ。年と月の生の数字は出ない。
+ */
+async function runCalculateNumerology(
+  rawArguments: unknown,
+  context: AstroContext,
+): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const resolved = await resolveNumerologyBirth(args, context);
+  if ("error" in resolved) return resolved.error;
+
+  const masters = requireMasters(args);
+  const utcOffset = optionalNumber(args, "utc_offset", -14, 14);
+  const year = optionalInteger(args, "target_year", 1, 9999);
+  const month = optionalInteger(args, "target_month", 1, 12);
+  const day = optionalInteger(args, "target_day", 1, 31);
+  const given = [year, month, day].filter((value) => value !== undefined).length;
+  if (given !== 0 && given !== 3) {
+    throw new AstroError(
+      "基準日は target_year / target_month / target_day を 3 つそろえて指定してください" +
+        "（3 つとも省くと今日で見ます）",
+    );
+  }
+  if (given === 3) {
+    assertCalendarDay(year as number, month as number, day as number);
+  }
+
+  // 基準日を省いたときだけ「今日」を決める（時差はそのためだけに使う）
+  const now = context.now ? context.now() : new Date();
+  const shifted = new Date(now.getTime() + (utcOffset ?? 0) * 3_600_000);
+  const target =
+    given === 3
+      ? { year: year as number, month: month as number, day: day as number }
+      : {
+          year: shifted.getUTCFullYear(),
+          month: shifted.getUTCMonth() + 1,
+          day: shifted.getUTCDate(),
+        };
+
+  let result: NumerologyResult;
+  try {
+    result = calculateNumerology({
+      year: resolved.year,
+      month: resolved.month,
+      day: resolved.day,
+      target,
+      masters,
+    });
+  } catch (error) {
+    // 純関数の言い分には生年月日の値が混じり得るので、そのままは返さない
+    if (error instanceof NumerologyError) {
+      throw new AstroError(
+        "その生年月日からは数秘術を計算できませんでした" +
+          "（数秘術は西暦 1〜9999 年の生年月日で計算します。値は返事に出しません）。",
+      );
+    }
+    throw error;
+  }
+
+  // 見出しの 1 行。直接指定のときは「どこから来た数か」だけを言い、生年月日の値は書かない
+  const heading =
+    resolved.source === "chart"
+      ? `チャート: ${resolved.label}（${resolved.chartId}）`
+      : "生年月日: 直接指定（値は返事に出しません）";
+
+  return {
+    content: [{ type: "text", text: `${heading}\n${formatNumerologyText(result)}` }],
+    structuredContent:
+      resolved.source === "chart"
+        ? { source: resolved.source, chart_id: resolved.chartId, label: resolved.label, ...result }
+        : { source: resolved.source, ...result },
   };
 }
 
@@ -2158,6 +2445,9 @@ async function callAstroTool(
     if (name === "progressions") return await runProgressions(rawArguments, context);
     if (name === "yearly_overview") return await runYearlyOverview(rawArguments, context);
     if (name === "transit_events") return await runTransitEvents(rawArguments, context);
+    if (name === "calculate_numerology") {
+      return await runCalculateNumerology(rawArguments, context);
+    }
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
     if (error instanceof AstroError) return toolError(error.message);
