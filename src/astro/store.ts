@@ -1,10 +1,9 @@
 /**
  * 占星術層の台帳（KV）。
  *
- * 3 種類しか置かない:
- *   key:<キー文字列>        → { user, name, role }        … 誰の URL か
+ * 2 種類しか置かない:
  *   email:<SHA-256 の hex>  → { user, name, role }        … 誰の Cloudflare Access アカウントか
- *                                                          （OAuth の口 POST /astro/mcp 用。
+ *                                                          （唯一の入口 POST /astro/mcp 用。
  *                                                            メールの生の文字列は置かない）
  *   chart:<user>:<chart_id> → 計算済みチャート             … 何を計算したか
  *
@@ -22,11 +21,11 @@
 import { cryptoRandom, type RandomSource } from "../random";
 
 /**
- * キー台帳の中身。
+ * 許可台帳の中身。
  *
  * ⚠ role は**今のところ挙動を分けていません**（2026-08-22、progressions が chart_id 方式に
- *    なって owner 特権が無くなったため）。既存の鍵レコードとの互換と、将来の友だちキーの
- *    ために型と検算だけ残してあります。
+ *    なって owner 特権が無くなったため）。既存のレコードとの互換と、将来の友だちのために
+ *    型と検算だけ残してあります。
  */
 export type Role = "owner" | "friend";
 
@@ -87,9 +86,6 @@ export interface AstroKv {
   list(options: { prefix: string }): Promise<{ keys: { name: string }[] }>;
 }
 
-/** URL に載る鍵の形（これ以外は KV を引く前に弾く。鍵そのものはどこにも出さない） */
-const KEY_PATTERN = /^[A-Za-z0-9_-]{20,128}$/;
-
 /** chart_id に使う文字（0/o/1/l のような紛らわしい字は外す） */
 const CHART_ID_ALPHABET = "23456789abcdefghijkmnpqrstuvwxyz";
 const CHART_ID_LENGTH = 8;
@@ -113,7 +109,7 @@ export function isChartId(value: string): boolean {
 }
 
 /**
- * 台帳のレコード（`key:<鍵>` も `email:<ハッシュ>` も同じ形）を検算して AuthContext にする。
+ * 台帳のレコード（`email:<ハッシュ>` の中身）を検算して AuthContext にする。
  * 壊れていたら null（＝載っていないのと同じ扱い）。
  */
 function parseAuthRecord(raw: string): AuthContext | null {
@@ -133,19 +129,6 @@ function parseAuthRecord(raw: string): AuthContext | null {
 
   const name = typeof record["name"] === "string" && record["name"].length > 0 ? record["name"] : user;
   return { user, name, role };
-}
-
-/**
- * URL の鍵を台帳と照合する。
- * 見つからなければ null（**呼び出し側は鍵の中身をレスポンスにもログにも出さないこと**）。
- */
-export async function lookupKey(kv: AstroKv, key: string): Promise<AuthContext | null> {
-  if (!KEY_PATTERN.test(key)) return null;
-
-  const raw = await kv.get(`key:${key}`);
-  if (raw === null) return null;
-
-  return parseAuthRecord(raw);
 }
 
 /** メールの正規化（前後の空白を落として小文字に）。ハッシュも照合もこの形で揃える */
@@ -169,8 +152,8 @@ export async function hashEmail(email: string): Promise<string> {
 
 /**
  * OAuth（Cloudflare Access）を通ってきた人のメールを台帳と照合する。
- * 鍵のときと同じレコード（`{user, name, role}`）を `email:<ハッシュ>` に置いてあり、
- * `user` が同じなら鍵で入っても OAuth で入っても同じチャート台帳になります。
+ * レコード（`{user, name, role}`）は `email:<ハッシュ>` に置いてあり、`user` がその人の
+ * チャート台帳（`chart:<user>:…`）の仕切りになります。
  *
  * 見つからなければ null（**呼び出し側はメールの生の文字列をレスポンスにもログにも出さないこと**）。
  */

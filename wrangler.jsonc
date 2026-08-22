@@ -2,9 +2,9 @@
  * fortune-gatekeeper（占いMCP）の Wrangler 設定。
  *
  * カード層（POST /mcp）は状態も秘密も持たない直通電話のまま。
- * 占星術層は KV を使う ―― 鍵とメールの台帳、計算済みチャートの置き場（ASTRO_KV）。
- * 2026-08-22 に OAuth の入口（POST /astro/mcp）を並走で足したので、
- * OAuth のトークン置き場（OAUTH_KV）と Access の Secret 6 本がここに増えている。
+ * 占星術層は KV を使う ―― メールの許可台帳、計算済みチャートの置き場（ASTRO_KV）。
+ * 2026-08-22 に入口を OAuth（POST /astro/mcp）1 本にしたので、
+ * OAuth のトークン置き場（OAUTH_KV）と Access の Secret 6 本がここに要る。
  *
  * main が src/worker.ts なのは、そこが OAuth の門を被せた入口だから
  * （門を通らない口はすべて今までどおり src/index.ts のルーターに落ちる）。
@@ -16,8 +16,9 @@
   "compatibility_date": "2026-08-01",
   // access-handler が JWT の base64url を解くのに node:buffer を使う（手本と同じ実装）
   "compatibility_flags": ["nodejs_compat"],
-  // Workers Logs は使うが、呼び出しごとの記録（リクエスト URL を含む）は残さない ―― 占星術層の鍵が
-  // URL に載っているため。自前の console 出力だけが残る（鍵はそこにも書かない）。2026-08-22、査読対応
+  // Workers Logs は使うが、呼び出しごとの記録（リクエスト URL とヘッダを含む）は残さない ――
+  // OAuth の `/callback?code=…` の URL や Authorization: Bearer のトークンが呼び出し記録に
+  // 映りうるため。URL 鍵の引退後も据え置き。自前の console 出力だけが残る。2026-08-22、査読対応
   "observability": {
     "enabled": true,
     "logs": {
@@ -30,7 +31,7 @@
   "limits": {
     "cpu_ms": 30000
   },
-  // 占星術層の台帳。key:<鍵> と email:<SHA-256> → {user,name,role}、
+  // 占星術層の台帳。email:<SHA-256> → {user,name,role}、
   // chart:<user>:<chart_id> → 計算済みチャート。
   // ⚠ デプロイ前に `npx wrangler kv namespace create ASTRO_KV` で作成し、
   //    出力された id をここに差し替えること。ローカル dev はこの id を使わない

@@ -1,14 +1,13 @@
 /**
  * OAuth の門の接合部（`POST /astro/mcp`）。
  *
- * 占星術層にはもう一つ、URL に鍵を載せる口（`POST /mcp/<鍵>`）があります。こちらはその並走版で、
- * **中身はまったく同じハンドラ**（`handleAstroMcpRequest`）に同じ形の `AuthContext` を渡すだけです。
- * 違うのは「誰か」の確かめ方だけ:
+ * 占星術層の入口はここ 1 つです（URL に鍵を載せる口 `POST /mcp/<鍵>` は 2026-08-22 に引退。
+ * 当時はこの門がその並走版でした）。門を通ったあとは `handleAstroMcpRequest` に `AuthContext` を渡すだけ。
+ * 「誰か」の確かめ方:
  *
- *   URL 鍵   … `key:<鍵>` を台帳に照合（鍵を知っている人＝本人）
  *   OAuth    … Cloudflare Access（OIDC）で身元を確かめ、そのメールを `email:<SHA-256>` で台帳に照合
  *
- * `user` が同じレコードを指していれば、どちらの口から入っても同じチャート台帳が見えます。
+ * 台帳レコードの `user` がチャートの仕切り（`chart:<user>:<chart_id>`）です。
  *
  * 二重の門にしてあるのは手本（保管庫MCPの門番 Worker）と同じ考えで、Access のポリシーを通っても
  * こちらの台帳に載っていなければ 403 です。**メールの生の文字列はレスポンスにもログにも出しません**
@@ -38,7 +37,7 @@ export type AuthEnvWithOauth = AuthEnv & { OAUTH_PROVIDER: OAuthHelpers };
 export interface AstroOAuthDeps {
   getEngine: () => Promise<SwissEph>;
   /**
-   * 占星術層の本体。既定は `handleAstroMcpRequest`（＝ URL 鍵の口とまったく同じ関数）。
+   * 占星術層の本体。既定は `handleAstroMcpRequest`。
    * テストから「何が渡ったか」を覗くためだけの差し込み口で、本番では差し替えません。
    */
   handle?: (request: Request, context: AstroContext) => Promise<Response>;
@@ -127,7 +126,7 @@ export function createAstroOAuthHandler(deps: AstroOAuthDeps) {
 
 /**
  * OAuth の面（`/authorize`・`/callback`）以外は、今までどおりのルーター（`src/index.ts`）に落とす。
- * カード層（`POST /mcp`）も URL 鍵の口（`POST /mcp/<鍵>`）も `/` も `/health` もここを素通りします。
+ * カード層（`POST /mcp`）も `/` も `/health` も（引退した `/mcp/<何か>` の 404 も）ここを素通りします。
  */
 export const defaultHandler = {
   async fetch(

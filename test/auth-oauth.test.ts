@@ -6,13 +6,13 @@
  * 見るのは 3 つ:
  *   - 許可台帳（`email:<SHA-256>`）の照合＝ `hashEmail` / `lookupEmail`
  *   - 認証済みリクエストの受け口＝ 誰を通すか、何を占星術層に渡すか
- *   - `defaultHandler` ＝ OAuth の面以外が今までどおりのルーターに落ちること（鍵の口を含む）
+ *   - `defaultHandler` ＝ OAuth の面以外が今までどおりのルーターに落ちること
  *
  * ⚠ メールアドレスは全部この場の作りごと（example.com）です。実在のものは書きません。
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { ASTRO_TOOLS, handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
-import { hashEmail, lookupEmail, lookupKey, type AuthContext } from "../src/astro/store";
+import { hashEmail, lookupEmail, type AuthContext } from "../src/astro/store";
 import {
   createAstroOAuthHandler,
   defaultHandler,
@@ -34,17 +34,12 @@ const MEMBER_RECORD = JSON.stringify({ user: "user1", name: "オーナー", role
 /** 台帳に載っていない人 */
 const STRANGER_EMAIL = "yobarete-nai@example.com";
 
-/** 鍵の口（並走中）の鍵。同じ user1 を指す */
-const OWNER_KEY = "testkey1234567890abcd";
-const OWNER_RECORD = JSON.stringify({ user: "user1", name: "オーナー", role: "owner" });
-
 let kv: FakeKv;
 let engine: FakeEngine;
 
 beforeEach(() => {
   kv = new FakeKv();
   kv.store.set(`email:${MEMBER_HASH}`, MEMBER_RECORD);
-  kv.store.set(`key:${OWNER_KEY}`, OWNER_RECORD);
   engine = makeFakeEngine();
 });
 
@@ -259,7 +254,7 @@ describe("OAuth の口（POST /astro/mcp）", () => {
     expect(JSON.stringify((context as unknown as AstroContext).auth)).not.toContain("@");
   });
 
-  it("user が同じなら鍵の口と同じチャート台帳が見える", async () => {
+  it("台帳の user がチャートの仕切り（同じ user なら同じチャート台帳が見える）", async () => {
     // OAuth の口から 1 件登録して……
     const saved = await postAstro(
       {
@@ -286,12 +281,12 @@ describe("OAuth の口（POST /astro/mcp）", () => {
     expect(saved.json.result.isError).toBeUndefined();
     const chartId = saved.json.result.structuredContent.chart_id as string;
 
-    // ……鍵の口の AuthContext（同じ user1）で一覧に出る
-    const auth = (await lookupKey(kv, OWNER_KEY)) as AuthContext;
+    // ……台帳から引いた同じ AuthContext（user1）で一覧に出る
+    const auth = (await lookupEmail(kv, MEMBER_EMAIL)) as AuthContext;
     expect(auth.user).toBe("user1");
     const context: AstroContext = { auth, kv, getEngine: async () => engine };
     const response = await handleAstroMcpRequest(
-      new Request(`http://localhost/mcp/${OWNER_KEY}`, {
+      new Request("http://localhost/astro/mcp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_charts", arguments: {} } }),
@@ -339,24 +334,16 @@ describe("defaultHandler", () => {
     expect(names).toContain("draw_cards");
   });
 
-  it("鍵の口（POST /mcp/<鍵>）はそのまま届く", async () => {
-    const { response, text } = await through(`/mcp/${OWNER_KEY}`, {
+  // 2026-08-22 URL 鍵の引退。占星術層は apiRoute（/astro/mcp）の内側だけになったので、
+  //            ルーターに落ちる /mcp/<何か> はただの 404
+  it("/mcp のあとに何か続く URL は 404（鍵の口はもう無い）", async () => {
+    const { response, text } = await through("/mcp/nosuchkey0000000000", {
       jsonrpc: "2.0",
       id: 1,
       method: "tools/list",
     });
-    expect(response.status).toBe(200);
-    const names = JSON.parse(text).result.tools.map((tool: { name: string }) => tool.name);
-    expect(names).toContain("save_chart");
-  });
-
-  it("台帳に無い鍵は今までどおり 401", async () => {
-    const { response } = await through("/mcp/nosuchkey0000000000", {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/list",
-    });
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(404);
+    expect(text).not.toContain("nosuchkey");
   });
 
   it("案内文と /health もそのまま", async () => {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import worker, { type Env } from "../src/index";
+import worker from "../src/index";
 import { normalizeDegree } from "../src/astro/chart";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
 import {
@@ -20,8 +20,6 @@ import {
   type FakeEngine,
 } from "./stubs/fake-engine";
 
-const OWNER_KEY = "testkey1234567890abcd";
-const OWNER_RECORD = JSON.stringify({ user: "user1", name: "オーナー", role: "owner" });
 const OWNER: AuthContext = { user: "user1", name: "オーナー", role: "owner" };
 
 let kv: FakeKv;
@@ -30,7 +28,6 @@ let context: AstroContext;
 
 beforeEach(() => {
   kv = new FakeKv();
-  kv.store.set(`key:${OWNER_KEY}`, OWNER_RECORD);
   engine = makeFakeEngine();
   context = {
     auth: OWNER,
@@ -40,10 +37,10 @@ beforeEach(() => {
   };
 });
 
-/** 占星術層に JSON-RPC を 1 発投げる（鍵の照合は済んでいる前提のハンドラ直叩き） */
+/** 占星術層に JSON-RPC を 1 発投げる（身元の確認は済んでいる前提のハンドラ直叩き） */
 async function rpc(body: unknown, ctx: AstroContext = context): Promise<any> {
   const response = await handleAstroMcpRequest(
-    new Request(`http://localhost/mcp/${OWNER_KEY}`, {
+    new Request("http://localhost/astro/mcp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -65,22 +62,18 @@ async function call(name: string, args: unknown = {}, ctx: AstroContext = contex
   return json.result;
 }
 
-/** worker.fetch 経由（鍵の照合込み） */
-async function fetchMcp(
+/** ルーター（src/index.ts）を直に叩く。占星術層はもうここには居ないので env も渡さない */
+async function fetchRouter(
   path: string,
-  body: unknown,
+  body: unknown = null,
   method = "POST",
-  // withEnv: false で「バインディングごと無い」状態を再現する
-  options: { withEnv?: boolean } = {},
-): Promise<{ response: Response; json: any }> {
+): Promise<{ response: Response; text: string; json: any }> {
   const init: RequestInit = { method };
   if (method === "POST") {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);
   }
-  const env: Env | undefined =
-    options.withEnv === false ? undefined : { ASTRO_KV: kv.asKvNamespace() };
-  const response = await worker.fetch(new Request(`http://localhost${path}`, init), env);
+  const response = await worker.fetch(new Request(`http://localhost${path}`, init));
   const text = await response.text();
   let json: any = null;
   try {
@@ -88,7 +81,7 @@ async function fetchMcp(
   } catch {
     json = null;
   }
-  return { response, json };
+  return { response, text, json };
 }
 
 /** 標準の出生データ（1990-06-15 12:00 UTC・東京） */
@@ -189,7 +182,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(instructions).toContain("shukuyo_compat");
     expect(instructions).toContain("Lahiri");
     expect(instructions).toContain("宿の意味はサーバーに載せていません");
-    expect(instructions).toContain("三体系（ホロスコープ・宿曜・四柱）を合算する根拠はありません");
+    expect(instructions).toContain("四体系（ホロスコープ・宿曜・四柱・九星）を合算する根拠はありません");
     // 二次進行も chart_id 方式（出生データを預かっているチャートが要る）
     expect(instructions).toContain("progressions");
     expect(instructions).toContain("progressions も chart_id で呼べます");
@@ -210,7 +203,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("15 本のツールを返す", async () => {
+  it("17 本のツールを返す", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -229,6 +222,8 @@ describe("占星術層の initialize / tools/list", () => {
       "shukuyo",
       "shukuyo_compat",
       "four_pillars",
+      "synastry",
+      "kyusei",
     ]);
   });
 
@@ -244,82 +239,21 @@ describe("占星術層の initialize / tools/list", () => {
   });
 });
 
-describe("鍵の照合（POST /mcp/<鍵>）", () => {
-  it("知らない鍵は 401。鍵そのものは返事に出さない", async () => {
-    const { response, json } = await fetchMcp("/mcp/badkey0000", {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/list",
-    });
-    expect(response.status).toBe(401);
-    expect(json.error.code).toBe(-32001);
-    expect(json.error.message).not.toContain("badkey0000");
-    expect(json.error.message).toContain("確認できませんでした");
-  });
-
-  it("形の違う鍵（記号入り・短すぎ）も同じ 401", async () => {
-    for (const key of ["a", "%E3%81%82%E3%81%82", "key:testkey123"]) {
-      const { response } = await fetchMcp(`/mcp/${key}`, {
+// 2026-08-22 URL 鍵（POST /mcp/<鍵>）を引退させた。占星術層の入口は OAuth の POST /astro/mcp
+//            だけになり、このルーターに残るのはカード層と案内文・404 だけ
+describe("ルーティング（カード層と 404）", () => {
+  it("/mcp のあとに何か続く URL は 404（もう鍵の口ではない・URL を echo しない）", async () => {
+    for (const path of ["/mcp/anything", "/mcp/testkey1234567890abcd/", "/mcp/a/b"]) {
+      const { response, text } = await fetchRouter(path, {
         jsonrpc: "2.0",
         id: 1,
         method: "tools/list",
       });
-      expect(response.status).toBe(401);
+      expect(response.status).toBe(404);
+      expect(text).toContain("見つかりません");
+      expect(text).not.toContain("anything");
+      expect(text).not.toContain("testkey");
     }
-  });
-
-  it("正しい鍵なら initialize と tools/list が通る", async () => {
-    const init = await fetchMcp(`/mcp/${OWNER_KEY}`, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: { protocolVersion: "2025-06-18" },
-    });
-    expect(init.response.status).toBe(200);
-    expect(init.response.headers.get("Access-Control-Allow-Origin")).toBe("*");
-    expect(init.json.result.serverInfo.name).toBe("fortune-gatekeeper");
-    expect(init.json.result.instructions).toContain("ホロスコープ");
-
-    const tools = await fetchMcp(`/mcp/${OWNER_KEY}`, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/list",
-    });
-    expect(tools.json.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
-      "save_chart",
-      "list_charts",
-      "get_chart",
-      "delete_chart",
-      "transit",
-      "lunar_return",
-      "solar_return",
-      "progressions",
-      "update_default_location",
-      "yearly_overview",
-      "transit_events",
-      "calculate_numerology",
-      "shukuyo",
-      "shukuyo_compat",
-      "four_pillars",
-    ]);
-  });
-
-  it("鍵つき URL でも GET / DELETE は 405", async () => {
-    for (const method of ["GET", "DELETE"]) {
-      const { response } = await fetchMcp(`/mcp/${OWNER_KEY}`, null, method);
-      expect(response.status).toBe(405);
-    }
-  });
-
-  it("KV バインディングが無ければ 500（黙って動いたふりをしない）", async () => {
-    const { response, json } = await fetchMcp(
-      `/mcp/${OWNER_KEY}`,
-      { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      "POST",
-      { withEnv: false },
-    );
-    expect(response.status).toBe(500);
-    expect(json.error.code).toBe(-32603);
   });
 
   // 2026-08-22 roll_astro_dice 追加で更新（カード層のツールが増えても占星術層は混ざらない）
@@ -328,7 +262,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
   // 2026-08-22 calculate_numerology を鍵つき層へ移して 5 本に戻した
   //            （公開層には個人データの口を生やさない）
   it("公開カード層は無傷（カード層のツールだけ・鍵も要らない）", async () => {
-    const { response, json } = await fetchMcp("/mcp", {
+    const { response, json } = await fetchRouter("/mcp", {
       jsonrpc: "2.0",
       id: 1,
       method: "tools/list",
@@ -343,7 +277,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
     ]);
   });
 
-  it("案内文は占星術層の存在にだけ触れ、鍵の形は書かない", async () => {
+  it("案内文は占星術層の存在にだけ触れ、その入口の URL は書かない", async () => {
     const response = await worker.fetch(new Request("http://localhost/"));
     const text = await response.text();
     expect(text).toContain("占星術");
@@ -3474,6 +3408,10 @@ describe("chart_id の衝突回避", () => {
  *   （既存 12 本は 1 文字も動かしていない）
  * - 2026-08-22 四柱推命の four_pillars（15 本目）を末尾に追加で更新
  *   （既存 14 本は 1 文字も動かしていない）
+ * - 2026-08-22 シナストリーの synastry（16 本目）を末尾に追加で更新
+ *   （既存 15 本は 1 文字も動かしていない）
+ * - 2026-08-22 九星気学の kyusei（17 本目）を末尾に追加で更新
+ *   （既存 16 本は 1 文字も動かしていない）
  */
 const FROZEN_ASTRO_TOOLS = [
   {
@@ -4210,6 +4148,105 @@ const FROZEN_ASTRO_TOOLS = [
           "minimum": -14,
           "maximum": 14,
           "description": "date と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）。日運の日界（0 時）もこの時差の土地の暦で見る"
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "synastry",
+    "title": "シナストリー（2 枚の出生図の間のアスペクトと在ハウス）",
+    "description": "登録済みの出生図 2 枚を突き合わせ、その間のアスペクト（シナストリー）と、互いのハウスに相手の天体がどう入るか（ハウスオーバーレイ）を計算する。\na / b は**どちらも呼び出した人の台帳の chart_id**（list_charts で確認できる）。相手のぶんも先に save_chart で登録しておけば、**相手の出生データを会話に出さずに済む**（他人の台帳のチャートは見えない）。\n返るのは (1) A の 10 天体＋ASC / MC と B の 10 天体＋ASC / MC の総当たりアスペクト（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、既定オーブ 5°＝orb で変えられる。ノードは除く）、(2) A の天体（ノード込みの 11 天体）が B のハウスのどこに入るか、(3) その逆＝B の天体が A のハウスのどこに入るか。\nどちらも止まった図なので接近・離反は付かない。天体の黄経そのものは返さないので、位置が要るときは get_chart で 1 枚ずつ読むこと（1 枚の図の中のアスペクトも get_chart の持ち場）。\nこのツールは解釈をしない——相性の良し悪しも組み合わせの意味もサーバーに載せていないので、読みはあなた自身の知識で。\n出生データそのものは返事に出さない（アスペクトと在ハウスの派生値だけを返す）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "string",
+          "description": "片方のチャート ID（list_charts で確認できる）"
+        },
+        "b": {
+          "type": "string",
+          "description": "もう片方のチャート ID（a とは別の ID）"
+        },
+        "orb": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 10,
+          "description": "アスペクトのオーブ（度）。省略すると 5°（止まった図同士は広めに取るのが通例。トランジットの 1° とは別）"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "kyusei",
+    "title": "九星気学（本命星・月命星・日命星と年盤・月盤・日盤）",
+    "description": "九星気学の本命星・月命星・日命星と、指定した日の年盤・月盤・日盤を計算する。\n**chart_id か、生年月日の直接指定（year / month / day）のどちらか一方**で呼ぶ。**出生時刻は任意**——hour / minute が無くても本命星・月命星は出る（時刻の分からない出生でも引ける。省いたときはその日の 12 時を仮に置いている）。ただし**立春・節入りの当日**に生まれた人は時刻で星が変わるので、そのときだけ両方の候補を alternatives に添える（hour / minute を付ければ確定する）。\n返るのは (1) 本命星（立春で切った年）・月命星（節で切った月）・日命星（陽遁／陰遁）、(2) date（省略すると今）の年盤・月盤・日盤（後天定位に中宮からの差を配ったもの。9 宮は 北・北東・東・南東・南・南西・西・北西・中宮 の順、図は南を上・東を左に描く）と、各盤に立つ殺 9 種（五黄殺・暗剣殺・歳破／月破／日破・本命殺・本命的殺・月命殺・月命的殺）。date は**過去も未来も受ける**。\n**採った規約は名前で固定して返り値にも書く**（流派で割れるところが多いので、読む側が「この鯖はこの流派」と分かるように）——年界は立春（節分までは 1 つ前の年の星）/ 月界は節（太陽黄経 30° ごと）/ 日界は 0 時 / 陽遁・陰遁は**冬至・夏至に最も近い甲子日**で切り替え（前後が同距離なら後の甲子）/ **閏遁は置かない**（切り替えの間隔が 240 日になる期間もそのまま続ける）/ 破は支の対冲を**八方位に丸めた**もの（四隅の宮では 60° のうち 30° だけが実際の破に当たる）/ **時盤は持たない**。⚠ **日盤の切り替えは流派で割れる**ので、暦によっては日の星がこのサーバーと違う日がある。\n**このツールは解釈をしない**——吉方位も凶方位も相性も、九星や殺の意味もサーバーに載せていない（「五黄殺」「歳破」は計算上の名前で、吉凶の言葉は 1 語も足していない）。読みはあなた自身の知識で。ホロスコープ・宿曜・四柱・九星はそれぞれ別の体系で、**四体系を合算する根拠はない**（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n九星気学も誕生日を使うので公開のカード層には置いていない。この鍵つきの入口だけにある。出生データそのものは返事に出さない（星・盤・殺のような派生値だけを返す）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）。生年月日の直接指定とはどちらか一方だけを指定する"
+        },
+        "year": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999,
+          "description": "出生年（西暦）。登録せずに一度だけ見るときの直接指定で、year / month / day は 3 つそろえて指定する（chart_id とは併用できない）"
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12,
+          "description": "出生月（1-12）"
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31,
+          "description": "出生日（1-31）"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23,
+          "description": "出生時刻の「時」（0-23、出生地の現地時刻）。**任意**——省くとその日の 12 時で見る（立春・節入りの当日の生まれのときだけ星が変わるので、そのときは両方の候補を添える）"
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59,
+          "description": "出生時刻の「分」（0-59、出生地の現地時刻）。任意"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "出生地の UTC からの時差（時間単位。日本は 9。省略すると UTC 扱い）。直接指定のときだけ使う（chart_id では預かっている時差を使う）"
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^-?\\d{1,5}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2})?$",
+          "description": "年盤・月盤・日盤を見る日 \"YYYY-MM-DD\"、時刻まで決めたいときは \"YYYY-MM-DD HH:MM\"（省略すると今）。過去も未来も受ける。時盤は無いので、時刻は月界・日界の境の判定にだけ効く"
+        },
+        "date_utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "description": "date と表示に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）。日盤の日界（0 時）も陽遁・陰遁の切り替えの甲子日も、この時差の土地の暦で見る"
         }
       },
       "additionalProperties": false

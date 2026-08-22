@@ -1,7 +1,7 @@
 /**
  * OAuth の門（`POST /astro/mcp`）が使うバインディングの型。
  *
- * カード層・URL 鍵の口が使う `Env`（`ASTRO_KV` だけ）に、OAuth 面のぶんを足したものです。
+ * ルーター（`src/index.ts`）の `Env`（`ASTRO_KV` だけ）に、OAuth 面のぶんを足したものです。
  * 中身の出どころは 2 つ:
  *   - `OAUTH_KV` … `@cloudflare/workers-oauth-provider` がトークンとグラントを置く KV（台帳とは別の棚）
  *   - Secrets 6 本 … Cloudflare Access for SaaS (OIDC) アプリの値。`wrangler secret put` で入れます

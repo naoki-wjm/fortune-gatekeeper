@@ -6,11 +6,11 @@
  *   POST /astro/mcp                     … 占星術層（OAuth。`apiRoute`＝門の内側）
  *   /authorize /token /register /callback /.well-known/*
  *                                       … OAuth の面（`OAuthProvider` と access-handler が捌く）
- *   それ以外（POST /mcp・POST /mcp/<鍵>・GET / ・GET /health …）
+ *   それ以外（POST /mcp・GET / ・GET /health …）
  *                                       … 今までどおり `src/index.ts` のルーターへ素通り
  *
- * 占星術層への入口が 2 つあるのは並走中だからです ―― URL 鍵（`/mcp/<鍵>`）は当面そのまま残し、
- * OAuth の口が落ち着いてから引退させる予定です（README の「占星術層の入口は 2 つ」の節）。
+ * 占星術層への入口はこの `POST /astro/mcp` の 1 つだけです ―― URL に鍵を載せる旧口
+ * （`/mcp/<鍵>`）は 2026-08-22 に引退しました（README の「URL 鍵の引退」の段落）。
  *
  * `@cloudflare/workers-oauth-provider` は `cloudflare:workers` を読むので Node（vitest）では
  * 動きません。その import をこの 1 枚に閉じ込め、中身のハンドラは `src/auth/oauth.ts` に

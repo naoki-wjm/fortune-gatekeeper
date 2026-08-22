@@ -491,3 +491,80 @@ export function formatCrossAspect(hit: CrossAspect, prefix = "T."): string {
 export function formatNatalAspect(hit: NatalAspect): string {
   return `${hit.a} ${hit.aspect.symbol} ${hit.b}（${hit.aspect.name} / オーブ ${orbText(hit.aspect.orb)}）`;
 }
+
+// ---------------------------------------------------------------------------
+// シナストリー（2 枚の図の間）
+// ---------------------------------------------------------------------------
+
+/** 2 枚の図の間のアスペクト（A 側と B 側。どちらも止まった図なので対等） */
+export interface SynastryAspect {
+  /** A の図の点（天体名 / ASC / MC） */
+  a: string;
+  /** B の図の点 */
+  b: string;
+  aspect: AspectHit;
+}
+
+/**
+ * 2 枚の図の間のアスペクト（シナストリー）。
+ *
+ * 相手が別の点列なので natalAspects の「i < j の組だけ」ではなく **総当たり**
+ * ―― A.太陽 × B.月 と A.月 × B.太陽 は別の組で、どちらも要る（裏返しの重複ではない）。
+ * applying を付けないのは crossAspects と違って**どちらの図も止まっている**から
+ * ―― 出生図同士に接近も離反もない（速度はどちらも 0 で渡ってくる）。
+ */
+export function synastryAspects(
+  a: readonly AspectPoint[],
+  b: readonly AspectPoint[],
+  orb: number = DEFAULT_NATAL_ORB,
+): SynastryAspect[] {
+  const results: SynastryAspect[] = [];
+  for (const pointA of a) {
+    for (const pointB of b) {
+      const aspect = getAspect(pointA.lon, pointB.lon, orb);
+      if (!aspect) continue;
+      results.push({ a: pointA.name, b: pointB.name, aspect });
+    }
+  }
+  results.sort((x, y) => x.aspect.orb - y.aspect.orb);
+  return results;
+}
+
+/** 相手の図のハウスで数えた在ハウス（ハウスオーバーレイ）の 1 件 */
+export interface HouseOverlayEntry {
+  planet: string;
+  house: number;
+}
+
+/**
+ * 天体の並びを、渡されたカスプ（＝相手の図のハウス）で数え直す。
+ *
+ * getHouse を回すだけの薄い関数。ノードも落とさない
+ * ―― アスペクトの相手には入れないが、どのハウスに居るかは一覧に出す方針（get_chart と同じ）。
+ */
+export function houseOverlay(
+  planets: readonly { id: number; lon: number }[],
+  cusps: readonly number[],
+): HouseOverlayEntry[] {
+  return planets.map((planet) => ({
+    planet: planetName(planet.id),
+    house: getHouse(planet.lon, cusps),
+  }));
+}
+
+/**
+ * 「A.太陽 ☌ B.月（コンジャンクション / オーブ 1.40°）」
+ *
+ * シナストリーの 1 行。クロス（T. / N.）と同じく**どちらの図の点か**を札で示すが、
+ * 止まった図同士なので接近・離反は付かない。
+ */
+export function formatSynastryAspect(hit: SynastryAspect): string {
+  return `A.${hit.a} ${hit.aspect.symbol} B.${hit.b}（${hit.aspect.name} / オーブ ${orbText(
+    hit.aspect.orb,
+  )}）`;
+}
+
+/** 「太陽 7H / 月 4H / …」（在ハウスの 1 行） */
+export function formatHouseOverlay(overlay: readonly HouseOverlayEntry[]): string {
+  return overlay.map((entry) => `${entry.planet} ${entry.house}H`).join(" / ");
+}

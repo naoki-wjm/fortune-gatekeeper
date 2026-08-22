@@ -3,26 +3,27 @@
  *
  * ルーティング:
  *   POST   /mcp        … カード層・易占の MCP（JSON-RPC 2.0）。認証なし・誰が呼んでも同じ答え
- *   POST   /mcp/<鍵>   … 占星術層の MCP。KV の台帳に載っている鍵だけ通る
  *   GET    /           … 案内文（プレーンテキスト）
  *   GET    /health     … "ok"
  *   GET|DELETE /mcp    … 405（ステートレスなので SSE ストリームも DELETE も持たない）
  *   OPTIONS            … CORS プリフライト
+ *   それ以外           … 404
  *
- * ⚠ 鍵は URL に載る。**レスポンスにもログにも鍵そのものを出さないこと**
- *    （照合に失敗しても「確認できませんでした」としか言わない）。
+ * 占星術層（鍵つき層）の入口はここにはありません ―― `POST /astro/mcp` だけで、OAuth の門の内側
+ * （`src/worker.ts` → `src/auth/oauth.ts`）に置いてあります。URL に鍵を載せる旧口（`/mcp/<…>`）は
+ * 2026-08-22 に引退しました。**URL に載ってきた文字列はレスポンスにもログにも出さないこと**
+ * （鍵だったかもしれないものを echo しない）。
  *
- * このファイルは「鍵つき URL とカード層のルーター」で、Workers に渡す実際の入口は `src/worker.ts`
+ * このファイルは「カード層のルーター」で、Workers に渡す実際の入口は `src/worker.ts`
  * （OAuth の門＝`POST /astro/mcp` と `/authorize` などを被せたもの）です。OAuth を通らない口は
  * すべてここに落ちてきます ―― つまり下の `worker` が今までどおり全部を捌きます。
  * `worker` を named export にしてあるのは、OAuth 面（`cloudflare:workers` を読むため Node では
  * 動かない）に触らずにこのルーターだけをテストから叩けるようにするためです。
  */
 import { CORS_HEADERS, handleMcpRequest, jsonResponse } from "./mcp";
-import { handleAstroMcpRequest, lookupKey, type AstroKv } from "./astro/astro-mcp";
 import { getEngine } from "./astro/engine";
 
-/** Workers のバインディング。ASTRO_KV は占星術層の台帳（鍵とチャート） */
+/** Workers のバインディング。ASTRO_KV は占星術層の台帳（許可台帳とチャート） */
 export interface Env {
   ASTRO_KV: KVNamespace;
 }
@@ -30,7 +31,8 @@ export interface Env {
 /**
  * env を省略可にしてあるのは、カード層のテストが `worker.fetch(request)` の 1 引数で呼ぶため
  * （凍結テストは無修正のまま緑にしておきたい）。Workers 本番では必ず渡ってくる。
- * バインディングが無い状態で鍵つき URL を叩かれた場合は 500 で正直に言う。
+ * このルーター自身はもう KV を使わない（台帳を引くのは OAuth の門の内側だけ）が、
+ * `defaultHandler` が今までどおり env ごと素通しできるように引数は受け取っておく。
  */
 type MaybeEnv = Env | undefined;
 
@@ -77,11 +79,8 @@ function methodNotAllowed(): Response {
   );
 }
 
-/** 鍵つき URL の形。`/mcp/<鍵>` ちょうど 1 階層だけ */
-const ASTRO_PATH = /^\/mcp\/([^/]+)\/?$/;
-
 export const worker = {
-  async fetch(request: Request, env?: MaybeEnv): Promise<Response> {
+  async fetch(request: Request, _env?: MaybeEnv): Promise<Response> {
     try {
       const url = new URL(request.url);
 
@@ -96,50 +95,6 @@ export const worker = {
           return await handleMcpRequest(request, { getEngine });
         }
         return methodNotAllowed();
-      }
-
-      const astroMatch = ASTRO_PATH.exec(url.pathname);
-      if (astroMatch) {
-        if (request.method !== "POST") {
-          return methodNotAllowed();
-        }
-
-        const kv = env?.ASTRO_KV as AstroKv | undefined;
-        if (!kv) {
-          return jsonResponse(
-            {
-              jsonrpc: "2.0",
-              id: null,
-              error: { code: -32603, message: "占星術層の台帳（KV）が設定されていません" },
-            },
-            500,
-          );
-        }
-
-        // 鍵は decode してから照合する。以降どこにも書き出さない
-        let key: string;
-        try {
-          key = decodeURIComponent(astroMatch[1] as string);
-        } catch {
-          key = astroMatch[1] as string;
-        }
-        const auth = await lookupKey(kv, key);
-        if (!auth) {
-          return jsonResponse(
-            {
-              jsonrpc: "2.0",
-              id: null,
-              error: {
-                code: -32001,
-                message:
-                  "この URL では占星術層を使えません（鍵を確認できませんでした）。URL をもう一度お確かめください。",
-              },
-            },
-            401,
-          );
-        }
-
-        return await handleAstroMcpRequest(request, { auth, kv, getEngine });
       }
 
       if (url.pathname === "/health") {
