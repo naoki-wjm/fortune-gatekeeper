@@ -102,6 +102,22 @@ async function saveDefaultChart(): Promise<string> {
   return result.structuredContent.chart_id as string;
 }
 
+/**
+ * 偽エンジンの天体を 1 つだけずらす（以後に計算される図にだけ効く）。
+ *
+ * 偽エンジンは天体を 30° の格子に並べるので、素のままだと図の中のアスペクトが
+ * 全部ぴったり（オーブ 0°）になり、オーブを変えても本数が動かない。
+ * 1 天体だけ半端な角度へずらすと「オーブ 5° なら拾い、2° なら落ちる」組ができる。
+ */
+function nudgePlanet(planetId: number, delta: number): void {
+  const base = engine.swe_calc_ut;
+  engine.swe_calc_ut = (jd: number, id: number, flags: number): number[] => {
+    const result = base(jd, id, flags);
+    if (id === planetId) result[0] = normalizeDegree((result[0] as number) + delta);
+    return result;
+  };
+}
+
 // ---------------------------------------------------------------------------
 
 describe("占星術層の initialize / tools/list", () => {
@@ -631,6 +647,80 @@ describe("transit", () => {
     expect(result.structuredContent.aspects).toEqual([]);
   });
 
+  it("空の中のアスペクト（トランジット天体同士）も足す。既定オーブは 5°", async () => {
+    const chartId = await saveDefaultChart();
+    engine.offset = 0.5;
+
+    const result = await call("transit", { chart_id: chartId, year: 2026, month: 8, day: 20 });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain(
+      "■ 空の中のアスペクト（トランジット天体同士・メジャー5種・オーブ 5.0°・ノード除く）",
+    );
+    // 偽エンジンの空は 30° 刻み＝太陽 0.5°・水星 60.5°・金星 90.5°・火星 120.5°・土星 180.5°
+    expect(text).toContain("太陽 ⚹ 水星（セクスタイル / オーブ 0.00°）");
+    expect(text).toContain("太陽 □ 金星（スクエア / オーブ 0.00°）");
+    expect(text).toContain("太陽 △ 火星（トライン / オーブ 0.00°）");
+    expect(text).toContain("太陽 ☍ 土星（オポジション / オーブ 0.00°）");
+
+    // 個人向けの読み（ネイタルへ）が先、その日の空そのものの背景が後
+    expect(text.indexOf("■ ネイタルへのアスペクト")).toBeLessThan(
+      text.indexOf("■ 空の中のアスペクト"),
+    );
+
+    // 同じ図の中の 2 点なので T. / N. の札も接近・離反も付かない。ノードも入らない
+    const skySection = text.slice(text.indexOf("■ 空の中のアスペクト"));
+    expect(skySection).not.toContain("T.");
+    expect(skySection).not.toContain("N.");
+    expect(skySection).not.toContain("接近");
+    expect(skySection).not.toContain("離反");
+    expect(skySection).not.toContain("Nノード");
+    // transit は空側の ASC/MC を立てないので、点は天体だけ
+    expect(skySection).not.toContain("ASC");
+    expect(skySection).not.toContain("MC");
+
+    const chartAspects = result.structuredContent.chart_aspects;
+    expect(chartAspects.length).toBeGreaterThan(0);
+    for (const hit of chartAspects) {
+      expect(typeof hit.a).toBe("string");
+      expect(typeof hit.b).toBe("string");
+      expect(hit).not.toHaveProperty("applying");
+      expect(hit).not.toHaveProperty("transit");
+      expect(hit.a).not.toBe("Nノード");
+      expect(hit.b).not.toBe("Nノード");
+    }
+    // オーブの狭い順
+    const orbs = chartAspects.map((hit: { aspect: { orb: number } }) => hit.aspect.orb);
+    expect([...orbs].sort((a: number, b: number) => a - b)).toEqual(orbs);
+  });
+
+  it("orb は空の中のアスペクトにだけ効く（ネイタルへの 1° は動かない）", async () => {
+    const chartId = await saveDefaultChart();
+    // ネイタルを保存したあとで火星だけ 3° ずらす＝オーブ 5° なら拾い、2° なら落ちる
+    nudgePlanet(4, 3);
+
+    const when = { chart_id: chartId, year: 2026, month: 8, day: 20 };
+    const wide = await call("transit", when);
+    const narrow = await call("transit", { ...when, orb: 2 });
+    expect(narrow.isError).toBeUndefined();
+
+    expect(narrow.content[0].text).toContain(
+      "■ 空の中のアスペクト（トランジット天体同士・メジャー5種・オーブ 2.0°・ノード除く）",
+    );
+    expect(wide.content[0].text).toContain("太陽 △ 火星（トライン / オーブ 3.00°）");
+    expect(narrow.content[0].text).not.toContain("太陽 △ 火星");
+    expect(narrow.structuredContent.chart_aspects.length).toBeLessThan(
+      wide.structuredContent.chart_aspects.length,
+    );
+
+    // 図→ネイタルのアスペクトは 1° のまま（見出しも中身も同じ）
+    expect(narrow.content[0].text).toContain(
+      "■ ネイタルへのアスペクト（メジャー5種・オーブ 1.0°）",
+    );
+    expect(narrow.structuredContent.aspects).toEqual(wide.structuredContent.aspects);
+  });
+
   it("知らない chart_id は丁寧に断る", async () => {
     const result = await call("transit", { chart_id: "nosuchid" });
     expect(result.isError).toBe(true);
@@ -824,6 +914,59 @@ describe("lunar_return", () => {
     expect(missing.content[0].text).toContain("見つかりませんでした");
   });
 
+  it("リターン図の中のアスペクトも足す（ASC / MC も点に入り、ノードは入らない）", async () => {
+    const chartId = await saveChartWithHome();
+    engine.moonAnchorJd = jdOf(2026, 8, 21, 3);
+
+    const result = await call("lunar_return", { chart_id: chartId });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    expect(text).toContain(
+      "□ リターン図の中のアスペクト（メジャー5種・オーブ 5.0°・10 天体＋ASC/MC、ノード除く）",
+    );
+    // 偽エンジンのリターン図は ASC 90°（＝金星と重なる）・MC 300°
+    expect(text).toContain("金星 ☌ ASC（コンジャンクション / オーブ 0.00°）");
+    expect(text).toContain("太陽 ⚹ MC（セクスタイル / オーブ 0.00°）");
+    // ネイタルへの読みが先、リターン図そのものの背景が後
+    expect(text.indexOf("□ ネイタルへのアスペクト")).toBeLessThan(
+      text.indexOf("□ リターン図の中のアスペクト"),
+    );
+
+    const chartAspects = result.structuredContent.returns[0].chart_aspects;
+    expect(chartAspects.length).toBeGreaterThan(0);
+    const names: string[] = chartAspects.flatMap((hit: { a: string; b: string }) => [hit.a, hit.b]);
+    expect(names).toContain("ASC");
+    expect(names).toContain("MC");
+    expect(names).not.toContain("Nノード");
+    for (const hit of chartAspects) expect(hit).not.toHaveProperty("applying");
+  });
+
+  it("orb はリターン図の中のアスペクトにだけ効く（ネイタルへの 1° は動かない）", async () => {
+    const chartId = await saveChartWithHome();
+    engine.moonAnchorJd = jdOf(2026, 8, 21, 3);
+    // ネイタルを保存したあとで火星だけ 3° ずらす
+    nudgePlanet(4, 3);
+
+    const wide = await call("lunar_return", { chart_id: chartId });
+    const narrow = await call("lunar_return", { chart_id: chartId, orb: 2 });
+    expect(narrow.isError).toBeUndefined();
+
+    expect(narrow.content[0].text).toContain("オーブ 2.0°・10 天体＋ASC/MC、ノード除く");
+    expect(wide.content[0].text).toContain("太陽 △ 火星（トライン / オーブ 3.00°）");
+    expect(narrow.content[0].text).not.toContain("太陽 △ 火星");
+    expect(narrow.structuredContent.returns[0].chart_aspects.length).toBeLessThan(
+      wide.structuredContent.returns[0].chart_aspects.length,
+    );
+
+    expect(narrow.content[0].text).toContain(
+      "□ ネイタルへのアスペクト（メジャー5種・オーブ 1.0°）",
+    );
+    expect(narrow.structuredContent.returns[0].aspects).toEqual(
+      wide.structuredContent.returns[0].aspects,
+    );
+  });
+
   it("通過計算が開始 jd より後を返さなければエラーにする（wrapper のエラーチェックが壊れているため）", async () => {
     const chartId = await saveChartWithHome();
     engine.crossFails = true;
@@ -872,6 +1015,74 @@ describe("solar_return", () => {
     expect(result.structuredContent.is_next).toBe(true);
     expect(result.structuredContent.returns[0].utc).toBe("2027-06-16T06:00:00.000Z");
     expect(engine.crossCalls[0]?.startJd).toBeCloseTo(jdOf(2026, 8, 20) + 2.25 / 24, 6);
+  });
+
+  it("リターン図の中のアスペクトも足す（ASC / MC 込み・orb で広さが変わる）", async () => {
+    const chartId = await saveChartWithHome();
+    engine.sunAnchorJd = jdOf(2027, 6, 16, 6);
+    // ネイタルを保存したあとで火星だけ 3° ずらす
+    nudgePlanet(4, 3);
+
+    const wide = await call("solar_return", { chart_id: chartId, year: 2027 });
+    expect(wide.isError).toBeUndefined();
+    expect(wide.content[0].text).toContain(
+      "□ リターン図の中のアスペクト（メジャー5種・オーブ 5.0°・10 天体＋ASC/MC、ノード除く）",
+    );
+    expect(wide.content[0].text).toContain("金星 ☌ ASC（コンジャンクション / オーブ 0.00°）");
+    expect(wide.content[0].text).toContain("太陽 △ 火星（トライン / オーブ 3.00°）");
+    // ネイタルへの読みが先、リターン図そのものの背景が後
+    expect(wide.content[0].text.indexOf("□ ネイタルへのアスペクト")).toBeLessThan(
+      wide.content[0].text.indexOf("□ リターン図の中のアスペクト"),
+    );
+
+    const wideAspects = wide.structuredContent.returns[0].chart_aspects;
+    const names: string[] = wideAspects.flatMap((hit: { a: string; b: string }) => [hit.a, hit.b]);
+    expect(names).toContain("ASC");
+    expect(names).toContain("MC");
+    expect(names).not.toContain("Nノード");
+
+    const narrow = await call("solar_return", { chart_id: chartId, year: 2027, orb: 2 });
+    expect(narrow.isError).toBeUndefined();
+    expect(narrow.content[0].text).toContain("オーブ 2.0°・10 天体＋ASC/MC、ノード除く");
+    expect(narrow.content[0].text).not.toContain("太陽 △ 火星");
+    expect(narrow.structuredContent.returns[0].chart_aspects.length).toBeLessThan(
+      wideAspects.length,
+    );
+
+    // 図→ネイタルのアスペクトは 1° のまま
+    expect(narrow.content[0].text).toContain(
+      "□ ネイタルへのアスペクト（メジャー5種・オーブ 1.0°）",
+    );
+    expect(narrow.structuredContent.returns[0].aspects).toEqual(
+      wide.structuredContent.returns[0].aspects,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 図の中のアスペクト（3 ツール共通）
+// ---------------------------------------------------------------------------
+
+describe("図の中のアスペクトの orb", () => {
+  it("0.5〜10 の外は 3 ツールとも断る", async () => {
+    const chartId = await saveChartWithHome();
+    for (const name of ["transit", "lunar_return", "solar_return"]) {
+      for (const orb of [0.4, 11]) {
+        const bad = await call(name, { chart_id: chartId, orb });
+        expect(bad.isError).toBe(true);
+        expect(bad.content[0].text).toContain("orb");
+        expect(bad.content[0].text).toContain("0.5 以上 10 以下");
+      }
+    }
+  });
+
+  it("orb は未知の引数扱いにならない（get_chart と同じく受け付ける）", async () => {
+    const chartId = await saveChartWithHome();
+    for (const name of ["transit", "lunar_return", "solar_return", "get_chart"]) {
+      const ok = await call(name, { chart_id: chartId, orb: 3 });
+      expect(ok.isError).toBeUndefined();
+      expect(ok.content[0].text).not.toContain("未知の引数です");
+    }
   });
 });
 
@@ -1749,6 +1960,10 @@ describe("chart_id の衝突回避", () => {
  * サーバー側を直しても取り直しに来ない。うっかり文言をいじってしまわないよう丸ごと止めてある。
  * 意図して変えたときだけこの literal を更新すること。
  * ※ 返り値（content / structuredContent）を増やすのは「定義」の変更ではないので、ここは緑のまま。
+ *
+ * 更新履歴:
+ * - 2026-08-22 図の中のアスペクト追加で更新（transit / lunar_return / solar_return の 3 本だけ。
+ *   description に項目が 1 つ増え、inputSchema に orb が生えた。残り 8 本は 1 文字も動かしていない）
  */
 const FROZEN_ASTRO_TOOLS = [
   {
@@ -1924,7 +2139,7 @@ const FROZEN_ASTRO_TOOLS = [
   {
     "name": "transit",
     "title": "トランジットを見る",
-    "description": "登録済みのチャートに対して、指定時刻の天体（トランジット）を計算する。返るのは (1) トランジット天体の星座・度数・逆行、(2) それがネイタルのカスプで見て第何ハウスに入っているか、(3) ネイタル天体および ASC / MC とのアスペクト（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、オーブ 1°）。\n日時をすべて省略すると**現在時刻（UTC）**で計算する。特定の日を見たいときは year / month / day を指定し、必要なら hour / minute と utc_offset（その時刻がどの時差の土地の時計か）を添える。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "description": "登録済みのチャートに対して、指定時刻の天体（トランジット）を計算する。返るのは (1) トランジット天体の星座・度数・逆行、(2) それがネイタルのカスプで見て第何ハウスに入っているか、(3) ネイタル天体および ASC / MC とのアスペクト（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、オーブ 1°）、(4) **空の中のアスペクト**（トランジット天体同士。10 天体の総当たり、メジャー5種、既定オーブ 5°＝orb で変えられる。ノードは除く）。\n日時をすべて省略すると**現在時刻（UTC）**で計算する。特定の日を見たいときは year / month / day を指定し、必要なら hour / minute と utc_offset（その時刻がどの時差の土地の時計か）を添える。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1965,6 +2180,12 @@ const FROZEN_ASTRO_TOOLS = [
           "minimum": -14,
           "maximum": 14,
           "description": "指定した日時がどの時差の土地の時計か（時間単位。日本時間なら 9。省略すると UTC 扱い）"
+        },
+        "orb": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 10,
+          "description": "空の中のアスペクト（トランジット天体同士）のオーブ（度）。省略すると 5°（1 枚の図の中は広めに取るのが通例）。**ネイタルへのアスペクト（オーブ 1°）には効かない**"
         }
       },
       "required": [
@@ -1980,7 +2201,7 @@ const FROZEN_ASTRO_TOOLS = [
   {
     "name": "lunar_return",
     "title": "ルナリターン（月の帰還）",
-    "description": "登録済みチャートの**ネイタルの月**と同じ黄経に、空の月が戻ってくる瞬間（ルナリターン）を求め、その瞬間のホロスコープ一式を返す。約27.3日に1回めぐってくる。\nyear と month を指定すると**その月に入るリターンをすべて**返す（たいてい1回、暦月の並びによっては2回、まれに0回）。両方省略すると**現在時刻から見て次の1回**。year と month はそろえて指定すること。\n返るのは (1) リターンの瞬間（UTC。utc_offset を渡せばその土地の時計でも）、(2) リターン図の11天体（星座・度数・逆行・在ハウスはリターン図自身のカスプで）、(3) リターン図の ASC / MC とハウスカスプ、(4) ネイタルの天体・ASC / MC とのアスペクト（メジャー5種・オーブ 1°）。\nリターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」（save_chart の default_lat / default_lng）を使う。どちらも無いときは場所を教えてほしい旨を返す。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "description": "登録済みチャートの**ネイタルの月**と同じ黄経に、空の月が戻ってくる瞬間（ルナリターン）を求め、その瞬間のホロスコープ一式を返す。約27.3日に1回めぐってくる。\nyear と month を指定すると**その月に入るリターンをすべて**返す（たいてい1回、暦月の並びによっては2回、まれに0回）。両方省略すると**現在時刻から見て次の1回**。year と month はそろえて指定すること。\n返るのは (1) リターンの瞬間（UTC。utc_offset を渡せばその土地の時計でも）、(2) リターン図の11天体（星座・度数・逆行・在ハウスはリターン図自身のカスプで）、(3) リターン図の ASC / MC とハウスカスプ、(4) ネイタルの天体・ASC / MC とのアスペクト（メジャー5種・オーブ 1°）、(5) **リターン図の中のアスペクト**（リターン図の 10 天体＋ASC / MC の総当たり。メジャー5種、既定オーブ 5°＝orb で変えられる。ノードは除く）。\nリターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」（save_chart の default_lat / default_lng）を使う。どちらも無いときは場所を教えてほしい旨を返す。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2019,6 +2240,12 @@ const FROZEN_ASTRO_TOOLS = [
           "minimum": -14,
           "maximum": 14,
           "description": "表示に使う時差（時間単位。日本時間なら 9。省略すると UTC だけで表示する）。year / month を指定したときは、暦月の区切りもこの時差の土地の暦で見る。"
+        },
+        "orb": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 10,
+          "description": "リターン図の中のアスペクトのオーブ（度）。省略すると 5°（1 枚の図の中は広めに取るのが通例）。**ネイタルへのアスペクト（オーブ 1°）には効かない**"
         }
       },
       "required": [
@@ -2034,7 +2261,7 @@ const FROZEN_ASTRO_TOOLS = [
   {
     "name": "solar_return",
     "title": "ソーラーリターン（太陽の帰還）",
-    "description": "登録済みチャートの**ネイタルの太陽**と同じ黄経に、空の太陽が戻ってくる瞬間（ソーラーリターン）を求め、その瞬間のホロスコープ一式を返す。年に1回、誕生日の前後1日ほどの範囲でめぐってくる。\nyear を指定するとその年の1回を返す（その年の1月1日から探す）。省略すると**現在時刻から見て次の1回**。\n返るものは lunar_return と同じ形——リターンの瞬間、リターン図の11天体（在ハウスはリターン図自身のカスプ）、ASC / MC とハウスカスプ、ネイタルとのアスペクト（メジャー5種・オーブ 1°）。\nリターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」を使う。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
+    "description": "登録済みチャートの**ネイタルの太陽**と同じ黄経に、空の太陽が戻ってくる瞬間（ソーラーリターン）を求め、その瞬間のホロスコープ一式を返す。年に1回、誕生日の前後1日ほどの範囲でめぐってくる。\nyear を指定するとその年の1回を返す（その年の1月1日から探す）。省略すると**現在時刻から見て次の1回**。\n返るものは lunar_return と同じ形——リターンの瞬間、リターン図の11天体（在ハウスはリターン図自身のカスプ）、ASC / MC とハウスカスプ、ネイタルとのアスペクト（メジャー5種・オーブ 1°）、**リターン図の中のアスペクト**（リターン図の 10 天体＋ASC / MC の総当たり。メジャー5種、既定オーブ 5°＝orb で変えられる。ノードは除く）。\nリターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」を使う。\nこのツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2067,6 +2294,12 @@ const FROZEN_ASTRO_TOOLS = [
           "minimum": -14,
           "maximum": 14,
           "description": "表示に使う時差（時間単位。日本時間なら 9。省略すると UTC だけで表示する）"
+        },
+        "orb": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 10,
+          "description": "リターン図の中のアスペクトのオーブ（度）。省略すると 5°（1 枚の図の中は広めに取るのが通例）。**ネイタルへのアスペクト（オーブ 1°）には効かない**"
         }
       },
       "required": [

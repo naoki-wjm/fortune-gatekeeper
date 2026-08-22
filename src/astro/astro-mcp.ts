@@ -94,12 +94,14 @@ const ASTRO_INSTRUCTIONS =
   "使い分け: save_chart=出生データを登録して chart_id を得る / list_charts=登録済みの一覧 / " +
   "get_chart=登録済みの出生図を読み直す（天体・ASC/MC・カスプ・出生図の中のアスペクト。" +
   "transit は今の空、こちらは生まれたときの空） / " +
-  "transit=登録したチャートに対する任意時刻（省略時は現在）の天体・在ハウス・アスペクト / " +
+  "transit=登録したチャートに対する任意時刻（省略時は現在）の天体・在ハウス・アスペクト" +
+  "（ネイタルへのアスペクトと、空の中のアスペクトの両方） / " +
   "delete_chart=登録の取り消し / " +
   "update_default_location=「いつもの場所」だけの差し替え（引っ越したときなど。" +
   "出生データの再入力は要らず、計算済みの座標にも触りません） / " +
-  "lunar_return=ネイタルの月に空の月が戻る瞬間（約27.3日に1回）とその図 / " +
-  "solar_return=ネイタルの太陽に空の太陽が戻る瞬間（年に1回・誕生日のころ）とその図 / " +
+  "lunar_return=ネイタルの月に空の月が戻る瞬間（約27.3日に1回）とその図（図の中のアスペクトつき） / " +
+  "solar_return=ネイタルの太陽に空の太陽が戻る瞬間（年に1回・誕生日のころ）とその図" +
+  "（図の中のアスペクトつき） / " +
   "progressions=二次進行（一日一年法） / " +
   "yearly_overview=ソーラーリターンから次のソーラーリターンまでの 1 年の逆行期間・イングレス・" +
   "ネイタルへの外惑星トランジットの一覧（1 日刻み。" +
@@ -269,7 +271,9 @@ export const ASTRO_TOOLS = [
       "登録済みのチャートに対して、指定時刻の天体（トランジット）を計算する。" +
       "返るのは (1) トランジット天体の星座・度数・逆行、(2) それがネイタルのカスプで見て" +
       "第何ハウスに入っているか、(3) ネイタル天体および ASC / MC とのアスペクト" +
-      "（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、オーブ 1°）。\n" +
+      "（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、オーブ 1°）、" +
+      "(4) **空の中のアスペクト**（トランジット天体同士。10 天体の総当たり、メジャー5種、" +
+      "既定オーブ 5°＝orb で変えられる。ノードは除く）。\n" +
       "日時をすべて省略すると**現在時刻（UTC）**で計算する。" +
       "特定の日を見たいときは year / month / day を指定し、必要なら hour / minute と " +
       "utc_offset（その時刻がどの時差の土地の時計か）を添える。\n" +
@@ -303,6 +307,15 @@ export const ASTRO_TOOLS = [
           description:
             "指定した日時がどの時差の土地の時計か（時間単位。日本時間なら 9。省略すると UTC 扱い）",
         },
+        orb: {
+          type: "number",
+          minimum: 0.5,
+          maximum: 10,
+          description:
+            "空の中のアスペクト（トランジット天体同士）のオーブ（度）。省略すると 5°" +
+            "（1 枚の図の中は広めに取るのが通例）。" +
+            "**ネイタルへのアスペクト（オーブ 1°）には効かない**",
+        },
       },
       required: ["chart_id"],
       additionalProperties: false,
@@ -320,7 +333,9 @@ export const ASTRO_TOOLS = [
       "返るのは (1) リターンの瞬間（UTC。utc_offset を渡せばその土地の時計でも）、" +
       "(2) リターン図の11天体（星座・度数・逆行・在ハウスはリターン図自身のカスプで）、" +
       "(3) リターン図の ASC / MC とハウスカスプ、" +
-      "(4) ネイタルの天体・ASC / MC とのアスペクト（メジャー5種・オーブ 1°）。\n" +
+      "(4) ネイタルの天体・ASC / MC とのアスペクト（メジャー5種・オーブ 1°）、" +
+      "(5) **リターン図の中のアスペクト**（リターン図の 10 天体＋ASC / MC の総当たり。" +
+      "メジャー5種、既定オーブ 5°＝orb で変えられる。ノードは除く）。\n" +
       "リターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」" +
       "（save_chart の default_lat / default_lng）を使う。どちらも無いときは場所を教えてほしい旨を返す。\n" +
       "このツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
@@ -365,6 +380,15 @@ export const ASTRO_TOOLS = [
             "表示に使う時差（時間単位。日本時間なら 9。省略すると UTC だけで表示する）。" +
             "year / month を指定したときは、暦月の区切りもこの時差の土地の暦で見る。",
         },
+        orb: {
+          type: "number",
+          minimum: 0.5,
+          maximum: 10,
+          description:
+            "リターン図の中のアスペクトのオーブ（度）。省略すると 5°" +
+            "（1 枚の図の中は広めに取るのが通例）。" +
+            "**ネイタルへのアスペクト（オーブ 1°）には効かない**",
+        },
       },
       required: ["chart_id"],
       additionalProperties: false,
@@ -380,7 +404,9 @@ export const ASTRO_TOOLS = [
       "year を指定するとその年の1回を返す（その年の1月1日から探す）。省略すると" +
       "**現在時刻から見て次の1回**。\n" +
       "返るものは lunar_return と同じ形——リターンの瞬間、リターン図の11天体（在ハウスはリターン図自身のカスプ）、" +
-      "ASC / MC とハウスカスプ、ネイタルとのアスペクト（メジャー5種・オーブ 1°）。\n" +
+      "ASC / MC とハウスカスプ、ネイタルとのアスペクト（メジャー5種・オーブ 1°）、" +
+      "**リターン図の中のアスペクト**（リターン図の 10 天体＋ASC / MC の総当たり。" +
+      "メジャー5種、既定オーブ 5°＝orb で変えられる。ノードは除く）。\n" +
       "リターン図を立てる場所は lat / lng で指定する。省略するとチャートに登録された「いつもの場所」を使う。\n" +
       "このツールは解釈をしない——出た座標と角度をどう読むかは呼び出した側の仕事。",
     inputSchema: {
@@ -416,6 +442,15 @@ export const ASTRO_TOOLS = [
           maximum: 14,
           description:
             "表示に使う時差（時間単位。日本時間なら 9。省略すると UTC だけで表示する）",
+        },
+        orb: {
+          type: "number",
+          minimum: 0.5,
+          maximum: 10,
+          description:
+            "リターン図の中のアスペクトのオーブ（度）。省略すると 5°" +
+            "（1 枚の図の中は広めに取るのが通例）。" +
+            "**ネイタルへのアスペクト（オーブ 1°）には効かない**",
         },
       },
       required: ["chart_id"],
@@ -869,14 +904,31 @@ async function engineOf(context: AstroContext): Promise<SwissEph> {
 }
 
 /**
+ * 天体の並びを、アスペクト探索用の点に均す（ASC/MC は付けない）。
+ *
+ * 速度を 0 で置くのは意図的 ―― 「1 枚の図の中のアスペクト」は止まった図の話なので、
+ * 接近／離反を持たない（natalAspects は速度を見ない）。動く側として使うときは
+ * 呼び出し側で本物の速度を持つ点を組むこと（runTransit の transitPoints）。
+ *
+ * excludeNodes: true でノース ノード（id 11）を落とす。図の中のアスペクトは
+ * events.ts と同じ方針で **ノードを相手にも動く側にも入れない**（位置は一覧に出す）。
+ */
+function planetPointsOf(
+  planets: readonly { id: number; lon: number }[],
+  options: { excludeNodes?: boolean } = {},
+): AspectPoint[] {
+  const kept = options.excludeNodes ? planets.filter((planet) => planet.id !== 11) : planets;
+  return kept.map((planet) => ({ name: planetName(planet.id), lon: planet.lon, speed: 0 }));
+}
+
+/**
  * ネイタル天体＋ASC/MC を、アスペクト探索用の点に均す。
  *
  * 速度を 0 で置くのは意図的 ―― ネイタルは「止まっている図」なので、接近／離反は
  * 動いているトランジット側だけで決まる。移植元の calc.js はネイタルの速度もそのまま
  * 渡していて、同じ速度の天体同士だと接近判定が常に false になる（実害の小さい癖）。
  *
- * excludeNodes: true でノース ノード（id 11）を落とす。図の中のアスペクト（get_chart）は
- * events.ts と同じ方針で **ノードを相手にも動く側にも入れない**（位置は一覧に出す）。
+ * excludeNodes の扱いは planetPointsOf と同じ（ASC/MC は常に入る）。
  */
 function aspectPointsOf(
   chart: {
@@ -886,14 +938,7 @@ function aspectPointsOf(
   },
   options: { excludeNodes?: boolean } = {},
 ): AspectPoint[] {
-  const planets = options.excludeNodes
-    ? chart.planets.filter((planet) => planet.id !== 11)
-    : chart.planets;
-  const points: AspectPoint[] = planets.map((planet) => ({
-    name: planetName(planet.id),
-    lon: planet.lon,
-    speed: 0,
-  }));
+  const points = planetPointsOf(chart.planets, options);
   const angles = anglesOf(chart);
   points.push({ name: "ASC", lon: angles.asc, speed: 0 });
   points.push({ name: "MC", lon: angles.mc, speed: 0 });
@@ -1197,6 +1242,8 @@ async function runTransit(rawArguments: unknown, context: AstroContext): Promise
   const hour = optionalInteger(args, "hour", 0, 23);
   const minute = optionalInteger(args, "minute", 0, 59);
   const utcOffset = optionalNumber(args, "utc_offset", -14, 14);
+  // 空の中のアスペクトだけのオーブ。ネイタルへのアスペクト（DEFAULT_ORB＝1°）には効かない
+  const chartOrb = optionalNumber(args, "orb", 0.5, 10) ?? DEFAULT_NATAL_ORB;
 
   const hasDate =
     year !== undefined ||
@@ -1234,6 +1281,11 @@ async function runTransit(rawArguments: unknown, context: AstroContext): Promise
     speed: planet.speed,
   }));
   const aspects = crossAspects(natalPoints, transitPoints, DEFAULT_ORB);
+  // 空の中のアスペクト（トランジット天体同士）。transit は空側の ASC/MC を立てないので天体だけ
+  const chartAspects = natalAspects(
+    planetPointsOf(transitPlanets, { excludeNodes: true }),
+    chartOrb,
+  );
 
   const angles = anglesOf(chart);
   const lines: string[] = [
@@ -1263,6 +1315,17 @@ async function runTransit(rawArguments: unknown, context: AstroContext): Promise
     // 直接 map に渡さないこと（第 2 引数の prefix に添字が飛び込む）
     lines.push(...aspects.map((hit) => formatCrossAspect(hit)));
   }
+  lines.push("");
+
+  // 個人向けの読み（ネイタルへ）が先、その日の空そのものの背景が後
+  lines.push(
+    `■ 空の中のアスペクト（トランジット天体同士・メジャー5種・オーブ ${chartOrb.toFixed(1)}°・ノード除く）`,
+  );
+  if (chartAspects.length === 0) {
+    lines.push(`該当なし（オーブ ${chartOrb.toFixed(1)}° の範囲にメジャーアスペクトはありません）`);
+  } else {
+    lines.push(...chartAspects.map((hit) => formatNatalAspect(hit)));
+  }
 
   const structuredTransit = transitPlanets.map((planet: PlanetPosition) => ({
     id: planet.id,
@@ -1284,6 +1347,7 @@ async function runTransit(rawArguments: unknown, context: AstroContext): Promise
       is_now: isNow,
       transit_planets: structuredTransit,
       aspects,
+      chart_aspects: chartAspects,
     },
   };
 }
@@ -1348,7 +1412,10 @@ interface ReturnMoment {
   jd: number;
   date: Date;
   chart: ComputedChart;
+  /** リターン図 → ネイタル（オーブ 1° 固定） */
   aspects: ReturnType<typeof crossAspects>;
+  /** リターン図の中のアスペクト（10 天体＋ASC/MC。オーブは orb 引数） */
+  chartAspects: ReturnType<typeof natalAspects>;
 }
 
 /**
@@ -1383,6 +1450,8 @@ async function runReturn(
 
   const place = resolvePlace(args, chart);
   const utcOffset = optionalNumber(args, "utc_offset", -14, 14);
+  // リターン図の中のアスペクトだけのオーブ。ネイタルへのアスペクト（1°）には効かない
+  const chartOrb = optionalNumber(args, "orb", 0.5, 10) ?? DEFAULT_NATAL_ORB;
   const boundaryOffset = utcOffset ?? 0;
   const year = optionalInteger(args, "year", -5000, 5000);
   const month = isLunar ? optionalInteger(args, "month", 1, 12) : undefined;
@@ -1436,6 +1505,8 @@ async function runReturn(
       date: dateFromJulianDay(jd),
       chart: returnChart,
       aspects: crossAspects(natalPoints, returnPoints, DEFAULT_ORB),
+      // リターン図自身の ASC/MC も点に入れる（ノードは相手にも入れない）
+      chartAspects: natalAspects(aspectPointsOf(returnChart, { excludeNodes: true }), chartOrb),
     };
   });
 
@@ -1493,6 +1564,17 @@ async function runReturn(
     } else {
       lines.push(...moment.aspects.map((hit) => formatCrossAspect(hit)));
     }
+    // 個人向けの読み（ネイタルへ）が先、リターン図そのものの背景が後
+    lines.push(
+      `□ リターン図の中のアスペクト（メジャー5種・オーブ ${chartOrb.toFixed(1)}°・10 天体＋ASC/MC、ノード除く）`,
+    );
+    if (moment.chartAspects.length === 0) {
+      lines.push(
+        `該当なし（オーブ ${chartOrb.toFixed(1)}° の範囲にメジャーアスペクトはありません）`,
+      );
+    } else {
+      lines.push(...moment.chartAspects.map((hit) => formatNatalAspect(hit)));
+    }
   });
 
   const returns = moments.map((moment) => {
@@ -1513,6 +1595,7 @@ async function runReturn(
       mc: angles.mc,
       cusps: moment.chart.cusps,
       aspects: moment.aspects,
+      chart_aspects: moment.chartAspects,
     };
   });
 
