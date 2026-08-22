@@ -273,6 +273,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
   });
 
   // 2026-08-22 roll_astro_dice 追加で更新（カード層のツールが増えても占星術層は混ざらない）
+  // 2026-08-22 cast_geomancy 追加で更新（同上）
   it("公開カード層は無傷（カード層のツールだけ・鍵も要らない）", async () => {
     const { response, json } = await fetchMcp("/mcp", {
       jsonrpc: "2.0",
@@ -285,6 +286,7 @@ describe("鍵の照合（POST /mcp/<鍵>）", () => {
       "draw_cards",
       "cast_hexagram",
       "roll_astro_dice",
+      "cast_geomancy",
     ]);
   });
 

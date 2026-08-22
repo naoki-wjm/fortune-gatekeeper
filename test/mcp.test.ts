@@ -71,6 +71,19 @@ describe("initialize", () => {
     expect(instructions).toContain("意味はあなたの知識で");
   });
 
+  it("instructions にジオマンシーの一文も載る", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 40,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+    const instructions: string = json.result.instructions;
+    expect(instructions).toContain("cast_geomancy");
+    expect(instructions).toContain("16 図形の名前と点の並びだけを返す");
+    expect(instructions).toContain("意味はあなたの知識で");
+  });
+
   it("知らないバージョンなら既定の 2025-06-18 を返す", async () => {
     const { json } = await post({
       jsonrpc: "2.0",
@@ -83,10 +96,16 @@ describe("initialize", () => {
 });
 
 describe("tools/list", () => {
-  it("4 本のツールを返す", async () => {
+  it("5 本のツールを返す", async () => {
     const { json } = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
-    expect(names).toEqual(["list_decks", "draw_cards", "cast_hexagram", "roll_astro_dice"]);
+    expect(names).toEqual([
+      "list_decks",
+      "draw_cards",
+      "cast_hexagram",
+      "roll_astro_dice",
+      "cast_geomancy",
+    ]);
 
     const cast = json.result.tools[2];
     expect(cast.title).toBe("易占で卦を立てる");
@@ -129,6 +148,14 @@ describe("tools/list", () => {
     expect(dice.inputSchema.required).toBeUndefined();
     expect(dice.inputSchema.additionalProperties).toBe(false);
     expect(dice.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
+
+    const geomancy = json.result.tools[4];
+    expect(geomancy.title).toBe("ジオマンシーのシールドチャートを立てる");
+    // 引数なし（母 4 つの乱数だけがサーバー側にあり、呼び出し側に決める余地は無い）
+    expect(geomancy.inputSchema.properties).toEqual({});
+    expect(geomancy.inputSchema.required).toBeUndefined();
+    expect(geomancy.inputSchema.additionalProperties).toBe(false);
+    expect(geomancy.annotations).toEqual({ readOnlyHint: true, openWorldHint: false });
   });
 
   it("ツール定義は凍結（ChatGPT が接続時にキャッシュするので勝手に変えない）", async () => {
@@ -506,6 +533,73 @@ describe("tools/call", () => {
     expect(JSON.stringify(json.result.structuredContent)).not.toContain("meaning");
   });
 
+  it("cast_geomancy はシールドチャート一式を返す（引数なし）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 41,
+      method: "tools/call",
+      params: { name: "cast_geomancy", arguments: {} },
+    });
+    const result = json.result;
+    expect(result.isError).toBeUndefined();
+
+    const chart = result.structuredContent;
+    expect(Object.keys(chart)).toEqual([
+      "mothers",
+      "daughters",
+      "nieces",
+      "witnesses",
+      "judge",
+      "reconciler",
+    ]);
+    expect(chart.mothers).toHaveLength(4);
+    expect(chart.daughters).toHaveLength(4);
+    expect(chart.nieces).toHaveLength(4);
+    expect(Object.keys(chart.witnesses)).toEqual(["right", "left"]);
+
+    const figures = [
+      ...chart.mothers,
+      ...chart.daughters,
+      ...chart.nieces,
+      chart.witnesses.right,
+      chart.witnesses.left,
+      chart.judge,
+      chart.reconciler,
+    ] as { latin: string; name: string; lines: number[]; glyph: string }[];
+    expect(figures).toHaveLength(16); // 15 図形＋参考の和解者
+    for (const figure of figures) {
+      expect(Object.keys(figure)).toEqual(["latin", "name", "lines", "glyph"]);
+      expect(figure.lines).toHaveLength(4);
+      for (const dots of figure.lines) expect([1, 2]).toContain(dots);
+      expect(figure.glyph).toBe(figure.lines.map((dots) => (dots === 1 ? "•" : "••")).join("|"));
+    }
+    // 裁判官の点の総和は必ず偶数
+    expect(chart.judge.lines.reduce((sum: number, dots: number) => sum + dots, 0) % 2).toBe(0);
+
+    const lines: string[] = result.content[0].text.split("\n");
+    expect(lines).toHaveLength(7);
+    expect(lines[0]).toBe("ジオマンシー / シールドチャート");
+    expect(lines[1]).toContain(`1 ${chart.mothers[0].latin}（${chart.mothers[0].name}）`);
+    expect(lines[5]).toBe(
+      `裁判官: ${chart.judge.latin}（${chart.judge.name}）${chart.judge.glyph}`,
+    );
+    expect(lines[6]).toMatch(/^和解者（参考）: /);
+    // 意味は載せない
+    expect(result.content[0].text).not.toContain("意味");
+    expect(JSON.stringify(chart)).not.toContain("meaning");
+  });
+
+  it("cast_geomancy は引数を省いても立つ", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 42,
+      method: "tools/call",
+      params: { name: "cast_geomancy" },
+    });
+    expect(json.result.isError).toBeUndefined();
+    expect(json.result.structuredContent.mothers).toHaveLength(4);
+  });
+
   it("知らないツールも isError で返す", async () => {
     const { json } = await post({
       jsonrpc: "2.0",
@@ -690,6 +784,18 @@ describe("未知の引数キー", () => {
     expect(json.result.content[0].text).toContain("count");
   });
 
+  it("ジオマンシーは引数を取らないので何を渡しても断る（cast_geomancy）", async () => {
+    const { json } = await post({
+      jsonrpc: "2.0",
+      id: 43,
+      method: "tools/call",
+      params: { name: "cast_geomancy", arguments: { method: "shield" } },
+    });
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("未知の引数です: method");
+    expect(json.result.content[0].text).toContain("このツールは引数を取りません");
+  });
+
   it("正しい引数はこれまで通り通る", async () => {
     const draw = await post({
       jsonrpc: "2.0",
@@ -758,7 +864,8 @@ describe("ルーティング", () => {
     const guide = await response.text();
     expect(guide).toContain("fortune-gatekeeper");
     // ツールの列挙は tools/list と食い違わせない
-    expect(guide).toContain("list_decks, draw_cards, cast_hexagram, roll_astro_dice");
+    expect(guide).toContain("list_decks, draw_cards, cast_hexagram, roll_astro_dice, cast_geomancy");
+    expect(guide).toContain("ジオマンシー");
   });
 
   it("GET /health は ok", async () => {
@@ -790,6 +897,7 @@ describe("ルーティング", () => {
  *   2026-08-22 roll_astro_dice 追加で更新（既存 3 本の定義は 1 文字も変えていない）
  *   2026-08-22 lenormand 追加で更新（list_decks と draw_cards の description・deck の enum・
  *              spread の enum と description。cast_hexagram / roll_astro_dice は無変更）
+ *   2026-08-22 cast_geomancy 追加で更新（既存 4 本の定義は 1 文字も変えていない）
  */
 const FROZEN_TOOLS = [
   {
@@ -904,6 +1012,20 @@ const FROZEN_TOOLS = [
           "description": "何組振るか（既定 1・最大 3）。1 組 = 天体・星座・ハウスのダイス 3 個。"
         }
       },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "cast_geomancy",
+    "title": "ジオマンシーのシールドチャートを立てる",
+    "description": "西洋ジオマンシーのシールドチャートを立てる。サーバー側の乱数で母 4 つ（16 行ぶんの点の奇偶）を立て、そこから娘・姪・証人・裁判官（と参考の和解者）を導出して、16 図形の名前（ラテン名・日本語名）と点の並びだけを返す。意味は載せない——よく知られた体系なので、読み解きはあなた自身の知識で行うこと。自分で「立てたふり」をせず、必ずこのツールを呼ぶこと。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
       "additionalProperties": false
     },
     "annotations": {

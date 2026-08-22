@@ -22,6 +22,7 @@ import {
   formatAstroDiceText,
   rollAstroDice,
 } from "./astro-dice";
+import { castGeomancy, formatShieldChartText } from "./geomancy";
 
 /** serverInfo.name。占星術層（astro-mcp.ts）も同じ名前を名乗る */
 export const SERVER_NAME = "fortune-gatekeeper";
@@ -44,6 +45,8 @@ const SERVER_INSTRUCTIONS =
   "カードのほかに易占（周易）も立てられます——cast_hexagram が六爻を乱数で出し、" +
   "本卦・変爻・之卦・互卦を返します。卦辞・爻辞は載せていないので、そこもあなたの知識で読んでください。" +
   "アストロダイス（roll_astro_dice）も振れます——天体 × 星座 × ハウスの名前の組だけを返すので、" +
+  "意味はあなたの知識で。" +
+  "ジオマンシー（cast_geomancy）も立てられます——16 図形の名前と点の並びだけを返すので、" +
   "意味はあなたの知識で。";
 
 /** 相手が名乗ってきたバージョンがこの中にあればそれに合わせる */
@@ -277,6 +280,23 @@ const TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "cast_geomancy",
+    title: "ジオマンシーのシールドチャートを立てる",
+    description:
+      "西洋ジオマンシーのシールドチャートを立てる。" +
+      "サーバー側の乱数で母 4 つ（16 行ぶんの点の奇偶）を立て、" +
+      "そこから娘・姪・証人・裁判官（と参考の和解者）を導出して、" +
+      "16 図形の名前（ラテン名・日本語名）と点の並びだけを返す。" +
+      "意味は載せない——よく知られた体系なので、読み解きはあなた自身の知識で行うこと。" +
+      "自分で「立てたふり」をせず、必ずこのツールを呼ぶこと。",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -443,6 +463,15 @@ function runRollAstroDice(rawArguments: unknown): ToolResult {
   };
 }
 
+/** cast_geomancy は引数を取らない（乱数は母 4 つぶんの 16 ビットだけ、あとは導出） */
+function runCastGeomancy(): ToolResult {
+  const chart = castGeomancy();
+  return {
+    content: [{ type: "text", text: formatShieldChartText(chart) }],
+    structuredContent: chart,
+  };
+}
+
 /** カード層のツールごとの許可キー（ツール定義から自動で導く） */
 const CARD_ARGUMENT_KEYS = allowedArgumentKeys(TOOLS);
 
@@ -462,6 +491,7 @@ function callTool(name: unknown, rawArguments: unknown): ToolResult {
     if (name === "draw_cards") return runDrawCards(rawArguments);
     if (name === "cast_hexagram") return runCastHexagram(rawArguments);
     if (name === "roll_astro_dice") return runRollAstroDice(rawArguments);
+    if (name === "cast_geomancy") return runCastGeomancy();
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
     if (

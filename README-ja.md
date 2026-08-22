@@ -1,6 +1,6 @@
 # fortune-gatekeeper（占いMCP）
 
-Claude が会話の流れから直接「占いを引ける」ようにする MCP サーバー。Cloudflare Workers の上で動く、一本の直通電話。カード占い（6デッキ）・易占（周易）・アストロダイスと、鍵つきの占星術層（ホロスコープ計算）が入っています。
+Claude が会話の流れから直接「占いを引ける」ようにする MCP サーバー。Cloudflare Workers の上で動く、一本の直通電話。カード占い（6デッキ）・易占（周易）・アストロダイス・ジオマンシーと、鍵つきの占星術層（ホロスコープ計算）が入っています。
 
 **引く（立てる・計算する）のはサーバー、読むのは Claude。** ここには解釈層がありません。シャッフルも正逆も飛び出しも、易の六爻もサーバー側の乱数（`crypto.getRandomValues`）で決めて、その結果だけを返します。LLM に引かせると「引いたふり」ができてしまうので、乱数だけは渡さない、という設計です。
 
@@ -17,7 +17,7 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 | `rune` | ルーン（エルダーフサルク） | 25 | カードによる | **なし**（カード名のみ） | なし |
 | `lenormand` | ルノルマン | 36 | なし | **なし**（カード名＋番号＋対応トランプのみ） | なし |
 
-易占（周易）はデッキではなく別ツール（[`cast_hexagram`](#cast_hexagram)）です。六十四卦から1卦を立てて**卦名・番号・記号・爻の並びだけ**を返し、卦辞・爻辞は同梱しません。アストロダイス（[`roll_astro_dice`](#roll_astro_dice)）も同様にデッキではなく、天体・星座・ハウスの 12 面ダイス 3 個を振って**名前と記号の組だけ**を返します。
+易占（周易）はデッキではなく別ツール（[`cast_hexagram`](#cast_hexagram)）です。六十四卦から1卦を立てて**卦名・番号・記号・爻の並びだけ**を返し、卦辞・爻辞は同梱しません。アストロダイス（[`roll_astro_dice`](#roll_astro_dice)）も同様にデッキではなく、天体・星座・ハウスの 12 面ダイス 3 個を振って**名前と記号の組だけ**を返します。ジオマンシー（[`cast_geomancy`](#cast_geomancy)）はシールドチャート一式を立て、**16 図形の名前と点の並びだけ**を返します。
 
 ### なぜデッキで厚さが違うか
 
@@ -122,6 +122,14 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 
 `structuredContent.rolls[]` に `planet` / `sign` / `house` が入ります（`planet` と `sign` は `name` / `symbol` / `name_en`、`house` は `number` / `name`）。
 
+### `cast_geomancy`
+
+西洋ジオマンシーのシールドチャートを立てます。**立てるのはサーバー、読むのは Claude。** 引数はありません。
+
+乱数で決まるのは**母卦 4 つ＝16 点（各行 奇数なら 1 点・偶数なら 2 点）だけ**で、娘（母の転置）・姪（母と娘を 2 つずつ足す）・証人（姪を 2 つずつ足す）・裁判官（証人を足す）は純関数で完全導出です。参考として和解者（裁判官＋第一の母）も添えます。図形は 16 種（Via 道 / Populus 群衆 / Fortuna Major 大吉 / Fortuna Minor 小吉 / Puer 少年 / Puella 少女 / Amissio 損失 / Acquisitio 獲得 / Conjunctio 結合 / Carcer 牢獄 / Tristitia 悲しみ / Laetitia 喜び / Albus 白 / Rubeus 赤 / Caput Draconis 竜頭 / Cauda Draconis 竜尾）で、ラテン名・日本語名・点の並びだけを返し、意味は同梱しません（既知の体系＝Claude 自身の知識で読む）。
+
+`structuredContent` は `mothers[4]` / `daughters[4]` / `nieces[4]` / `witnesses.right` / `witnesses.left` / `judge` / `reconciler`、各図形は `latin` / `name` / `lines`（上から頭・首・体・足、1 点か 2 点）/ `glyph`。裁判官の点の総和は必ず偶数になる（定理）ので、それをテストで固定しています。
+
 ## 占星術層（`POST /mcp/<鍵>`・招かれた人だけ）
 
 カード層とは別の入口で、ホロスコープ（西洋占星術）の天体計算をします。**計算するのはサーバー、読むのは Claude。** 返るのは天体の黄経・ハウス・アスペクトといった座標と角度だけで、「射手座の人は〜」のたぐいの解釈は一切持ちません。エンジンは Swiss Ephemeris の wasm（Moshier モード＝天文暦ファイル不要）で、`src/astro/engine.ts` が唯一の窓口です。
@@ -212,6 +220,7 @@ fortune-gatekeeper/
   src/iching.ts         … 易の立筮（純関数。擲銭法・本筮法・略筮法）とテキスト整形
   src/hexagrams.ts      … 六十四卦・八卦の台帳（卦名と記号だけ。卦辞・爻辞は持たない）
   src/astro-dice.ts     … アストロダイス（12 面 × 3 個の面の表・振る純関数・テキスト整形）
+  src/geomancy.ts       … ジオマンシー（16 図形の台帳・母卦の乱数・シールドの完全導出・テキスト整形）
   src/decks.ts          … デッキ台帳（JSON を静的 import）
   src/spreads.ts        … スプレッド台帳
   src/random.ts         … 偏りのない乱数・シャッフル・重み付き抽選
@@ -289,7 +298,7 @@ claude mcp add --transport http fortune-gatekeeper https://fortune-mcp.my-sky.bl
 
 ChatGPT はコネクタ接続時に `tools/list` の結果（ツール名・説明・`deck` の enum）を取り込んで保持し、その後はサーバー側を更新しても取り直しません（`tools/call` しか飛んでこない）。スマホ版の再接続・アプリの入れ直しでも更新されず、取り直せるのは **Web 版の 設定 → プラグイン → 占いMCP → 情報 → 「更新する」** だけです（2026-08-19 tarot_full 追加時に判明）。デッキやツールを増やしたら、デプロイ後にこのボタンを押すこと。
 
-**`cast_hexagram` の追加（2026-08-19）、`roll_astro_dice` の追加（2026-08-22）でツール定義が変わりました。**占星術層も 2026-08-22 に `transit` / `lunar_return` / `solar_return` へ `orb` 引数が増えています（鍵つきコネクタ側も「更新する」）。`draw_cards` の説明文にもデッキの厚さの理由を1文足しているので、デプロイ後に「更新する」を押さないと ChatGPT 側からは易占ツールが見えません。テスト側では `test/mcp.test.ts` 末尾の `FROZEN_TOOLS` が `tools/list` の返り値を丸ごと凍結しているので、うっかり文言を変えるとそこが赤くなります（意図して変えたときだけ literal を更新 → デプロイ → 「更新する」）。
+**`cast_hexagram` の追加（2026-08-19）、`roll_astro_dice` / `lenormand` デッキ / `cast_geomancy` の追加（2026-08-22）でツール定義が変わりました。**占星術層も 2026-08-22 に `transit` / `lunar_return` / `solar_return` へ `orb` 引数が増えています（鍵つきコネクタ側も「更新する」）。`draw_cards` の説明文にもデッキの厚さの理由を1文足しているので、デプロイ後に「更新する」を押さないと ChatGPT 側からは易占ツールが見えません。テスト側では `test/mcp.test.ts` 末尾の `FROZEN_TOOLS` が `tools/list` の返り値を丸ごと凍結しているので、うっかり文言を変えるとそこが赤くなります（意図して変えたときだけ literal を更新 → デプロイ → 「更新する」）。
 
 ## 解説（`meanings/`）の更新
 
