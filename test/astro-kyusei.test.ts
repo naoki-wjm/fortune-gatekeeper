@@ -563,10 +563,11 @@ describe("kyusei", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    expect(tools).toHaveLength(17);
-    expect(tools[tools.length - 1]?.name).toBe("kyusei");
+    // 2026-08-24 のスーパーセット化でカード層 5 本が後ろに付いたので、全 22 本・kyusei は 17 番目
+    expect(tools).toHaveLength(22);
+    expect(tools[16]?.name).toBe("kyusei");
 
-    const tool: any = tools[tools.length - 1];
+    const tool: any = tools[16];
     expect(tool.title).toBe("九星気学（本命星・月命星・日命星と年盤・月盤・日盤）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual([
       "chart_id",

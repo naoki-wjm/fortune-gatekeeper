@@ -12,6 +12,7 @@ import { calculateNumerology } from "../src/numerology";
 import { calculateFourPillars, type FourPillarsResult } from "../src/four-pillars";
 import type { RandomSource } from "../src/random";
 import { FakeKv } from "./stubs/fake-kv";
+import { FROZEN_CARD_TOOLS } from "./stubs/frozen-card-tools";
 import {
   FAKE_ASCMC,
   FAKE_CUSPS,
@@ -187,8 +188,10 @@ describe("占星術層の initialize / tools/list", () => {
     expect(instructions).toContain("progressions");
     expect(instructions).toContain("progressions も chart_id で呼べます");
     expect(instructions).not.toContain("本人の URL");
-    // カード層の文言は混ざらない
-    expect(instructions).not.toContain("draw_cards");
+    // カード層 5 本の同居（2026-08-24 スーパーセット化）と、引いた結果を保存しない約束
+    expect(instructions).toContain("draw_cards");
+    expect(instructions).toContain("結果は一切保存されません");
+    expect(instructions).toContain("四体系と混ぜて点数を足す根拠もありません");
     // 作者の氏名は書かない
     expect(instructions).not.toContain("和条門");
   });
@@ -203,7 +206,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("17 本のツールを返す", async () => {
+  it("22 本のツールを返す（占星術層 17 本＋カード層 5 本のスーパーセット）", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -224,18 +227,62 @@ describe("占星術層の initialize / tools/list", () => {
       "four_pillars",
       "synastry",
       "kyusei",
+      // ここからカード層 5 本の同居（2026-08-24 スーパーセット化。定義は公開層と同一）
+      "list_decks",
+      "draw_cards",
+      "cast_hexagram",
+      "roll_astro_dice",
+      "cast_geomancy",
     ]);
+    // 名前はどれも一意（カード層と占星術層で重ならない）
+    expect(new Set(names).size).toBe(names.length);
   });
 
   it("ツール定義は凍結（クライアントが接続時にキャッシュするので勝手に変えない）", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 4, method: "tools/list" });
-    expect(json.result.tools).toEqual(FROZEN_ASTRO_TOOLS);
+    // カード層 5 本は公開層と同じ凍結 literal を共有する（定義が二重にならない証明でもある）
+    expect(json.result.tools).toEqual([...FROZEN_ASTRO_TOOLS, ...FROZEN_CARD_TOOLS]);
   });
 
   it("ping と知らないメソッド", async () => {
     expect((await rpc({ jsonrpc: "2.0", id: 5, method: "ping" })).result).toEqual({});
     const unknown = await rpc({ jsonrpc: "2.0", id: 6, method: "resources/list" });
     expect(unknown.error.code).toBe(-32601);
+  });
+});
+
+describe("カード層の同居（スーパーセット・2026-08-24）", () => {
+  it("draw_cards が鍵つきの入口から引ける（公開層と同じ実装への委譲）", async () => {
+    const result = await call("draw_cards", { deck: "tarot", count: 3 });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.cards).toHaveLength(3);
+  });
+
+  it("cast_geomancy も引ける（引数なし・乱数だけで完結）", async () => {
+    const result = await call("cast_geomancy");
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.mothers).toHaveLength(4);
+  });
+
+  it("カード系の引数検問はカード層のもの（未知の引数を黙って無視しない）", async () => {
+    const result = await call("draw_cards", { deck: "tarot", numbers: 3 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("未知の引数");
+  });
+
+  it("カード系を引いても KV には何も書かれない（委譲に kv を渡さない＝非永続化の検算）", async () => {
+    expect(kv.store.size).toBe(0);
+    for (const [name, args] of [
+      ["list_decks", {}],
+      ["draw_cards", { deck: "sky" }],
+      ["roll_astro_dice", { count: 2 }],
+      ["cast_hexagram", {}], // 納甲なし＝エンジンにも触らない
+      ["cast_geomancy", {}],
+    ] as const) {
+      const result = await call(name, args);
+      expect(result.isError).toBeUndefined();
+    }
+    expect(kv.store.size).toBe(0);
   });
 });
 

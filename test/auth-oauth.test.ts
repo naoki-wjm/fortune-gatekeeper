@@ -12,6 +12,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { ASTRO_TOOLS, handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
+import { TOOLS as CARD_TOOLS } from "../src/mcp";
 import { hashEmail, lookupEmail, type AuthContext } from "../src/astro/store";
 import {
   createAstroOAuthHandler,
@@ -178,8 +179,9 @@ describe("OAuth の口（POST /astro/mcp）", () => {
       { email: MEMBER_EMAIL },
     );
     expect(response.status).toBe(200);
+    // 2026-08-24 のスーパーセット化で、この入口には占星術層＋カード層の全 22 本が並ぶ
     expect(json.result.tools.map((tool: { name: string }) => tool.name)).toEqual(
-      ASTRO_TOOLS.map((tool) => tool.name),
+      [...ASTRO_TOOLS, ...CARD_TOOLS].map((tool) => tool.name),
     );
   });
 

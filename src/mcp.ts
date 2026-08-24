@@ -164,7 +164,12 @@ export function unknownArgumentMessage(allowed: readonly string[], raw: unknown)
 // ツール定義
 // ---------------------------------------------------------------------------
 
-const TOOLS = [
+/**
+ * カード層のツール定義（5 本）。公開層 `POST /mcp` の全部であり、鍵つき層 `POST /astro/mcp` にも
+ * まるごと同居する（スーパーセット構成、2026-08-24）。定義（name / schema / description）を
+ * ここ 1 か所に置き両入口が同じ配列を参照することで、片側だけ文言が古くなる事故を防ぐ。
+ */
+export const TOOLS = [
   {
     name: "list_decks",
     title: "デッキとスプレッドの一覧",
@@ -678,7 +683,12 @@ function assertKnownArguments(name: unknown, rawArguments: unknown): void {
   if (message !== null) throw new ArgumentError(message);
 }
 
-async function callTool(
+/**
+ * カード層のツールを 1 本呼ぶ。公開層 `/mcp` のほか、鍵つき層（astro-mcp.ts）からも
+ * カード系の委譲先として呼ばれる ―― そのとき渡ってくるのも CardContext（getEngine / now）
+ * だけで、KV も身元も受け取らない＝どちらの入口から引いても結果はどこにも保存されない。
+ */
+export async function callTool(
   name: unknown,
   rawArguments: unknown,
   context: CardContext,

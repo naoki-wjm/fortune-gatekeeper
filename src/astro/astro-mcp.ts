@@ -13,7 +13,9 @@
 import {
   SERVER_NAME,
   SERVER_VERSION,
+  TOOLS as CARD_TOOLS,
   allowedArgumentKeys,
+  callTool as callCardTool,
   jsonRpcError,
   jsonRpcResult,
   negotiateProtocolVersion,
@@ -216,7 +218,13 @@ const ASTRO_INSTRUCTIONS =
   "progressions も chart_id で呼べます（出生データを預かっているチャートが要ります）。\n" +
   "⚠ ホロスコープ・宿曜・四柱・九星はそれぞれ別の体系です。並べて眺めるのはよいのですが、" +
   "**四体系（ホロスコープ・宿曜・四柱・九星）を合算する根拠はありません**" +
-  "——点数を足したり多数決を取ったりしないでください。";
+  "——点数を足したり多数決を取ったりしないでください。\n" +
+  "この入口にはカード占い・易占・アストロダイス・ジオマンシー" +
+  "（list_decks / draw_cards / cast_hexagram / roll_astro_dice / cast_geomancy）も同居しています" +
+  "——公開の入口と同じもので、シャッフルも出目もサーバー側の乱数、読みはあなた自身の知識で行います。" +
+  "こちらは乱数だけで完結し、この鍵つきの入口から引いても**結果は一切保存されません**" +
+  "（台帳に入るのはチャートだけ）。カード・易・ダイス・ジオマンシーもまた別の体系です" +
+  "——四体系と混ぜて点数を足す根拠もありません。";
 
 // ---------------------------------------------------------------------------
 // ツール定義
@@ -4056,6 +4064,18 @@ async function runTransitEvents(rawArguments: unknown, context: AstroContext): P
 /** 占星術層のツールごとの許可キー（ツール定義から自動で導く） */
 const ASTRO_ARGUMENT_KEYS = allowedArgumentKeys(ASTRO_TOOLS);
 
+/**
+ * この入口（/astro/mcp）が公開するツールの明示リスト（allowlist）＝占星術層 17 本＋カード層 5 本の
+ * スーパーセット（2026-08-24。無料プランのコネクタ 1 枠でも全部に届くように）。
+ * 除外リストではなく「載せるものを列挙して合成する」方式 ―― カード層に共通ツールが増えれば
+ * CARD_TOOLS 経由で自動的にここにも載る。逆方向（公開層に個人データの口が混ざる事故）は、
+ * 公開層のルーター（index.ts / mcp.ts）が astro モジュールを import しない構造なので起こしようがない。
+ */
+const ASTRO_ENTRANCE_TOOLS = [...ASTRO_TOOLS, ...CARD_TOOLS];
+
+/** カード層へ委譲するツール名（定義そのものから導く＝手書きの写しを持たない） */
+const CARD_TOOL_NAMES: ReadonlySet<string> = new Set(CARD_TOOLS.map((tool) => tool.name));
+
 /** 綴り違い・余分なキーは黙って無視せず断る（知らないツール名は素通し＝下で名前を弾く） */
 function assertKnownAstroArguments(name: unknown, rawArguments: unknown): void {
   if (typeof name !== "string") return;
@@ -4071,6 +4091,14 @@ async function callAstroTool(
   context: AstroContext,
 ): Promise<ToolResult> {
   try {
+    if (typeof name === "string" && CARD_TOOL_NAMES.has(name)) {
+      // カード系はカード層の実装へそのまま委譲する。渡すのは乱数と暦に要る 2 つだけで、
+      // kv も auth も渡さない ―― 鍵つきの入口から引いても結果はどこにも保存されない（構造で担保）
+      return await callCardTool(name, rawArguments, {
+        getEngine: context.getEngine,
+        now: context.now,
+      });
+    }
     assertKnownAstroArguments(name, rawArguments);
     if (name === "save_chart") return await runSaveChart(rawArguments, context);
     if (name === "list_charts") return await runListCharts(context);
@@ -4129,7 +4157,7 @@ export async function handleAstroMcpRequest(
       return jsonRpcResult(id, {});
 
     case "tools/list":
-      return jsonRpcResult(id, { tools: ASTRO_TOOLS });
+      return jsonRpcResult(id, { tools: ASTRO_ENTRANCE_TOOLS });
 
     case "tools/call": {
       const callParams = (params ?? {}) as { name?: unknown; arguments?: unknown };
