@@ -553,15 +553,25 @@ export function houseOverlay(
 }
 
 /**
+ * 2 枚の図の間のアスペクトの 1 行。札（どちらの図の点か）を呼び出し側から渡す版。
+ *
+ * シナストリーは "A." / "B." だが、中点図（コンポジット）と第三者を突き合わせるときのように
+ * 別の名札が要る場面もあるので、整形の実体はここ 1 つにまとめてある。
+ */
+export function formatPairAspect(hit: SynastryAspect, labelA: string, labelB: string): string {
+  return `${labelA}${hit.a} ${hit.aspect.symbol} ${labelB}${hit.b}（${hit.aspect.name} / オーブ ${orbText(
+    hit.aspect.orb,
+  )}）`;
+}
+
+/**
  * 「A.太陽 ☌ B.月（コンジャンクション / オーブ 1.40°）」
  *
  * シナストリーの 1 行。クロス（T. / N.）と同じく**どちらの図の点か**を札で示すが、
  * 止まった図同士なので接近・離反は付かない。
  */
 export function formatSynastryAspect(hit: SynastryAspect): string {
-  return `A.${hit.a} ${hit.aspect.symbol} B.${hit.b}（${hit.aspect.name} / オーブ ${orbText(
-    hit.aspect.orb,
-  )}）`;
+  return formatPairAspect(hit, "A.", "B.");
 }
 
 /** 「太陽 7H / 月 4H / …」（在ハウスの 1 行） */

@@ -43,6 +43,7 @@ import {
   formatDegree,
   formatHouseOverlay,
   formatNatalAspect,
+  formatPairAspect,
   formatPlanetLines,
   formatSynastryAspect,
   getHouse,
@@ -75,11 +76,21 @@ import {
   calculateFourPillars,
   formatDateFortuneText,
   formatFourPillarsText,
+  orderedPillars,
   solarTermSpanFromJd,
   type DateFortuneResult,
   type FourPillarsResult,
   type SolarTermSpan,
 } from "../four-pillars";
+import {
+  MAX_PARTIES,
+  MIN_PARTIES,
+  PillarsRelationsError,
+  calculatePillarsRelations,
+  formatPillarsRelationsText,
+  type PartyInput,
+  type PillarsRelationsResult,
+} from "../pillars-relations";
 import {
   fourPillars,
   isBeforeRisshun,
@@ -138,6 +149,14 @@ import {
   type BodySet,
 } from "./events";
 import {
+  buildComposite,
+  compositeConventions,
+  formatCompositeConventions,
+  formatCompositePlanetLines,
+  type CompositeChart,
+  type CompositeSide,
+} from "./composite";
+import {
   computeProgression,
   crossUt,
   crossingsInRange,
@@ -179,6 +198,10 @@ const ASTRO_INSTRUCTIONS =
   "synastry=登録済みの出生図 2 枚の間のアスペクトと、互いのハウスに相手の天体がどう入るか" +
   "（2 人の関係を見るときはこれ。a / b とも自分の台帳の chart_id なので、" +
   "相手の出生データを会話に出さずに済みます） / " +
+  "composite=登録済みの出生図 2 枚の**中点図**（コンポジット。中点法＝ダヴィソンではありません）。" +
+  "2 人の関係そのものを 1 枚の図として見るときはこれで、" +
+  "「2 枚の間に線を引く」synastry とは見ているものが違います" +
+  "（c に第三者の chart_id を足すと三者読みになります） / " +
   "delete_chart=登録の取り消し / " +
   "update_default_location=「いつもの場所」だけの差し替え（引っ越したときなど。" +
   "出生データの再入力は要らず、計算済みの座標にも触りません） / " +
@@ -206,6 +229,10 @@ const ASTRO_INSTRUCTIONS =
   "大運は順行と逆行の両方）と、date（省略すると今）の流年・月運・日運。" +
   "日界 0 時・節気は太陽黄経・時刻の補正なしで、chart_id か生年月日＋出生時刻の直接指定で呼べます" +
   "（時柱が要るので時刻の分からない出生では引けません）。 / " +
+  "pillars_relations=四柱の**多者盤面**（登録済み 2〜4 枚の命式を横に並べ、日主・地支・空亡の" +
+  "つながりを表引きで拾う）。ひとりの命式そのものは four_pillars、" +
+  "**人と人のあいだに立つ関係**（六合・六沖・半合・同一支・空亡・三合局・方合）はこちらです" +
+  "——点数化も多数決もしません。 / " +
   "kyusei=九星気学の本命星・月命星・日命星と、date（省略すると今）の年盤・月盤・日盤と殺。" +
   "年界は立春・月界は節・日界は 0 時・陽遁陰遁は冬至／夏至に最も近い甲子日で切り替え。" +
   "**出生時刻は任意**で、chart_id か生年月日の直接指定で呼べます" +
@@ -1195,6 +1222,114 @@ export const ASTRO_TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "composite",
+    title: "コンポジット（2 枚の中点図）",
+    description:
+      "登録済みの出生図 2 枚から**コンポジット（中点図）**を組み立てる。" +
+      "2 人の関係そのものを 1 枚の図として見るときのもので、" +
+      "synastry（2 枚の間のアスペクト）とは見ているものが違う。\n" +
+      "採るのは**中点法**——A と B の同じ天体どうしの中点を取る方式で、" +
+      "**ダヴィソン法ではない**（ダヴィソンは 2 人の出生時刻・出生地の中間で図を立て直す別物）。\n" +
+      "a / b は**どちらも呼び出した人の台帳の chart_id**（list_charts で確認できる）。" +
+      "c を足すと**三者読み**——A×B の関係図に第三者 C がどう関わるかを見る" +
+      "（c は a / b と同じ ID でもよく、そのときは本人と関係図の重なりを見ることになる）。\n" +
+      "返るのは (1) 中点図の 10 天体（太陽〜冥王星。ノードは扱わない）とサイン・度数、" +
+      "(2) ASC / MC と 12 ハウスカスプ、(3) 中点図の中のアスペクト" +
+      "（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、既定オーブ 5°＝orb で変えられる。" +
+      "10 天体＋ASC/MC）、(4) c があれば中点図 × C の総当たりアスペクトと、" +
+      "互いのハウスに相手の天体がどう入るか（ハウスオーバーレイ）。\n" +
+      "**採った規約は名前で固定して返り値にも書く**（流派で割れるところなので）——" +
+      "中点は短い方の弧の真ん中（ぴったり 180° のときだけ A から黄経が増える向きに 90°）/ " +
+      "ASC とカスプは中点 MC を ARMC に直し、**2 人の出生緯度の平均**で立て直す" +
+      "（黄道傾斜は 2 人の出生時刻の中間時点のもの）/ " +
+      "ハウス方式は 2 枚が同じならそれ、違えばプラシーダス（P）/ " +
+      "出生データを預かっていない古い登録が混ざっているときだけ簡易方式" +
+      "（ASC も 2 枚の ASC の中点・カスプは 30° 等分）に落ちる。\n" +
+      "⚠ **中点図のハウスは参考程度**、というのが通説（中点図には「立てた場所と時刻」が無く、" +
+      "ASC とカスプは 2 人の緯度の平均から作った仮のもの）。天体と天体のアスペクトのほうが芯にある。\n" +
+      "このツールは解釈をしない——相性の良し悪しも組み合わせの意味もサーバーに載せていないので、" +
+      "読みはあなた自身の知識で。\n" +
+      "出生データそのものは返事に出さない（中点の座標という派生値だけを返し、" +
+      "A / B それぞれの天体の黄経も、出生地の緯度も中間緯度も出さない）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        a: {
+          type: "string",
+          description: "片方のチャート ID（list_charts で確認できる）",
+        },
+        b: {
+          type: "string",
+          description: "もう片方のチャート ID（a とは別の ID）",
+        },
+        c: {
+          type: "string",
+          description:
+            "三者読みで足す第三者のチャート ID（任意）。" +
+            "中点図 × C のアスペクトとハウスオーバーレイが増える（a / b と同じ ID でもよい）",
+        },
+        orb: {
+          type: "number",
+          minimum: 0.5,
+          maximum: 10,
+          description:
+            "アスペクトのオーブ（度）。省略すると 5°" +
+            "（止まった図なので広めに取るのが通例。トランジットの 1° とは別）",
+        },
+      },
+      required: ["a", "b"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: "pillars_relations",
+    title: "四柱の多者盤面（2〜4 人）",
+    description:
+      "登録済みの出生図 2〜4 枚から四柱推命の命式を立てて横に並べ、" +
+      "**日主・地支・空亡のつながりを表引きで**拾う。\n" +
+      "ひとりぶんの命式そのもの（通変星・十二運・蔵干・大運・流年）は four_pillars の持ち場で、" +
+      "こちらが返すのは**人と人のあいだに立つ関係だけ**。\n" +
+      "charts は**呼び出した人の台帳の chart_id の配列**（2〜4 枚。list_charts で確認できる）。" +
+      "同じ ID を 2 つ入れることはできない。時柱を立てるので、" +
+      "出生データを預かっていない古い登録では引けない（登録し直しを案内する）。\n" +
+      "返るのは (1) 各人の日主（天干・五行・陰陽）と 4 柱の干支・空亡、" +
+      "(2) 全ペアぶん ―― 日主の関係（比和／相生／相剋。どちらがどちらを生む・剋すかつき、" +
+      "天干五合が立てばそれも）と、**一方の各柱 × 他方の各柱の総当たり**で立つ地支の関係" +
+      "（六合・六沖・半合＝三合の 2 支・同一支）、" +
+      "「X の空亡に Y のどの柱の地支が入るか」を双方向で、" +
+      "(3) **3 人以上なら**全員の地支を持ち寄って揃う三合局・方合" +
+      "（誰のどの柱がどの支を出しているかつき。1 人で 3 支そろえている局は「単独で成立」と別枠）と、" +
+      "空亡の有向辺の連鎖（環が閉じていれば「相互」「三すくみ」と名前で）。\n" +
+      "**採った規約は名前で固定して返り値にも書く**——" +
+      "日界 0 時（23 時台生まれの「夜子時」は採らず、既定の 1 通りだけで並べる）/ " +
+      "空亡は日柱の旬から取り、相手のどの柱の地支も見る / " +
+      "半合は三合局の 3 支のうち 2 支（旺支を含まない組も同じ半合として数える）/ " +
+      "**刑・害・破は含めない**（拾い忘れではなく採らないという意味で、conventions の excluded に名前を書く）。\n" +
+      "**このツールは解釈をしない**——関係の名前を並べるだけで、**点数化も多数決もしない**" +
+      "（合の数を数えて相性の点にしたり、凶の札を足し合わせたりはサーバーの持ち場ではない）。" +
+      "読みはあなた自身の知識で。ホロスコープ・宿曜・四柱・九星はそれぞれ別の体系で、" +
+      "**四体系を合算する根拠はない**。\n" +
+      "出生データそのものは返事に出さない（命式＝干支のような派生値だけを返す）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        charts: {
+          type: "array",
+          items: { type: "string" },
+          minItems: MIN_PARTIES,
+          maxItems: MAX_PARTIES,
+          description:
+            "横に並べるチャート ID の配列（2〜4 枚。list_charts で確認できる）。" +
+            "同じ ID を 2 つ入れることはできない",
+        },
+      },
+      required: ["charts"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1312,6 +1447,46 @@ function requireMasters(args: Record<string, unknown>): MastersOption {
     );
   }
   return value as MastersOption;
+}
+
+/**
+ * chart_id の配列（pillars_relations の charts）。長さ・型・重複をここで弾く。
+ *
+ * 台帳を引く前に重複を落としておく ―― 同じ人を 2 回並べた盤面は
+ * 「自分の空亡に自分の地支が入る」を人と人の関係として数えてしまい、意味が変わるため。
+ */
+function requireChartIds(args: Record<string, unknown>, key: string): string[] {
+  const value = args[key];
+  if (!Array.isArray(value)) {
+    throw new AstroError(
+      `${key} は chart_id の配列で指定してください（${MIN_PARTIES}〜${MAX_PARTIES} 枚）`,
+    );
+  }
+  if (value.length < MIN_PARTIES || value.length > MAX_PARTIES) {
+    throw new AstroError(
+      `${key} は ${MIN_PARTIES}〜${MAX_PARTIES} 枚で指定してください: ${value.length} 枚` +
+        `（1 枚なら four_pillars、2 枚以上の盤面がこのツールの持ち場です）`,
+    );
+  }
+  const ids = value.map((entry, index) => {
+    if (typeof entry !== "string") {
+      throw new AstroError(`${key}[${index}] は文字列（chart_id）で指定してください`);
+    }
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) throw new AstroError(`${key}[${index}] が空です`);
+    if (trimmed.length > 32) {
+      throw new AstroError(`${key}[${index}] は 32 文字以内にしてください`);
+    }
+    return trimmed;
+  });
+  const duplicate = ids.find((id, index) => ids.indexOf(id) !== index);
+  if (duplicate !== undefined) {
+    throw new AstroError(
+      `${key} に同じチャート ${duplicate} が 2 つ入っています` +
+        "（盤面に並べるのは別々のチャートです）",
+    );
+  }
+  return ids;
 }
 
 function requireHouseSystem(args: Record<string, unknown>): string {
@@ -1971,8 +2146,12 @@ async function runTransit(rawArguments: unknown, context: AstroContext): Promise
 const SYNASTRY_NO_READING_NOTE =
   "（相性の良し悪しも組み合わせの意味もこのサーバーに載っていません。読みはあなた自身の知識で）";
 
-/** 「a に指定したチャート … が見つかりませんでした」（どちら側の引数かを言い添える） */
-function missingSynastryChart(key: "a" | "b", chartId: string): ToolResult {
+/**
+ * 「a に指定したチャート … が見つかりませんでした」（どちら側の引数かを言い添える）。
+ * 2 枚以上を突き合わせるツール（synastry / composite / pillars_relations）で共用。
+ * key は引数名そのもの（"a" / "b" / "c" / "charts[0]" …）。
+ */
+function missingPartyChart(key: string, chartId: string): ToolResult {
   return toolError(
     `${key} に指定したチャート ${chartId} が見つかりませんでした。` +
       "list_charts で登録済みの ID を確かめるか、save_chart で登録してください。",
@@ -2001,9 +2180,9 @@ async function runSynastry(rawArguments: unknown, context: AstroContext): Promis
 
   // どちらも「呼び出した人の台帳」しか引かない＝他人のチャートは存在ごと見えない
   const chartA = await getChart(context.kv, context.auth.user, idA);
-  if (!chartA) return missingSynastryChart("a", idA);
+  if (!chartA) return missingPartyChart("a", idA);
   const chartB = await getChart(context.kv, context.auth.user, idB);
-  if (!chartB) return missingSynastryChart("b", idB);
+  if (!chartB) return missingPartyChart("b", idB);
 
   const orb = optionalNumber(args, "orb", 0.5, 10) ?? DEFAULT_NATAL_ORB;
   // ノードはアスペクトの相手にも入れない（在ハウスの一覧には出る）
@@ -2068,6 +2247,219 @@ async function runSynastry(rawArguments: unknown, context: AstroContext): Promis
       orb,
       aspects,
       overlays: { a_in_b: aInB, b_in_a: bInA },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// コンポジット（中点図）
+// ---------------------------------------------------------------------------
+
+/** コンポジットの末尾に置く 1 行（解釈はサーバーの仕事ではない） */
+const COMPOSITE_NO_READING_NOTE =
+  "（相性の良し悪しも組み合わせの意味もこのサーバーに載っていません。読みはあなた自身の知識で）";
+
+/** 中点図のハウスは参考程度、という通説（サーバーの言い分ではなく前提の共有） */
+const COMPOSITE_HOUSE_CAVEAT =
+  "※ 中点図には「立てた場所と時刻」がありません。ASC とカスプは中点 MC と 2 人の緯度から作った" +
+  "仮のもので、**ハウスは参考程度**というのが通説です（芯にあるのは天体どうしのアスペクト）。";
+
+/** 簡易方式に落ちたときの言い添え（出生データを預かっていない古い登録が混ざったとき） */
+const COMPOSITE_FALLBACK_NOTE =
+  "※ 出生データを預かっていないチャートが混ざっているため、ASC は 2 枚の ASC の中点・" +
+  "カスプは ASC から 30° 等分の**簡易方式**で立てています" +
+  "（delete_chart で消して save_chart で登録し直すと、中点 MC から立て直す既定の方式になります）。" +
+  "この方式では MC が 10 カスプと一致しません。";
+
+/**
+ * 台帳のチャート 1 枚を中点図の材料に均す（出生データは jd と緯度だけ取り出してすぐ捨てる）。
+ * swe が null なのは簡易方式に落ちるときだけで、そのときは jd を作る必要もない。
+ */
+function compositeSideOf(swe: SwissEph | null, chart: StoredChart): CompositeSide {
+  const side: CompositeSide = {
+    planets: chart.planets,
+    cusps: chart.cusps,
+    ascmc: chart.ascmc,
+    houseSystem: chart.house_system,
+  };
+  const birth = chart.birth;
+  if (swe && birth) {
+    const moment: MomentInput = {
+      year: birth.year,
+      month: birth.month,
+      day: birth.day,
+      hour: birth.hour,
+      minute: birth.minute,
+      utcOffset: birth.utc_offset,
+    };
+    side.birth = { jd: julianDay(swe, moment), lat: birth.lat };
+  }
+  return side;
+}
+
+/**
+ * コンポジット（中点図）。
+ *
+ * 中点法 ―― A と B の同じ天体どうしの中点を取る（ダヴィソンではない）。
+ * 天体そのものは計算し直さず、台帳に入っている座標の中点を取るだけ。
+ * wasm を触るのは ASC / カスプを立てる 1 か所だけで、それも 2 枚とも出生データを
+ * 預かっているときの話（簡易方式に落ちるときはエンジンにすら触らない）。
+ *
+ * 出生データは返事に出さない。中点の座標（派生値）は出すが、**A / B それぞれの黄経**も
+ * **緯度（中間緯度を含む）**も出さない ―― 片方が分かると復元できてしまうため。
+ */
+async function runComposite(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const idA = requireString(args, "a", 32);
+  const idB = requireString(args, "b", 32);
+  const idC = optionalString(args, "c", 32);
+  if (idA === idB) {
+    return toolError(
+      "同じチャート同士です。中点図は別々の 2 枚から組み立てます" +
+        "（1 枚の図そのものは get_chart で見てください）。",
+    );
+  }
+
+  // どれも「呼び出した人の台帳」しか引かない＝他人のチャートは存在ごと見えない
+  const chartA = await getChart(context.kv, context.auth.user, idA);
+  if (!chartA) return missingPartyChart("a", idA);
+  const chartB = await getChart(context.kv, context.auth.user, idB);
+  if (!chartB) return missingPartyChart("b", idB);
+  // c は a / b と同じ ID でもよい（本人と関係図の重なりを見る読み方があるため）
+  const chartC = idC === undefined ? null : await getChart(context.kv, context.auth.user, idC);
+  if (idC !== undefined && !chartC) return missingPartyChart("c", idC);
+
+  const orb = optionalNumber(args, "orb", 0.5, 10) ?? DEFAULT_NATAL_ORB;
+
+  // 簡易方式に落ちる図（出生データを預かっていない古い登録）ではエンジンを起こさない
+  const needsEngine = chartA.birth !== undefined && chartB.birth !== undefined;
+  const swe = needsEngine ? await engineOf(context) : null;
+  const composite: CompositeChart = buildComposite(
+    swe,
+    compositeSideOf(swe, chartA),
+    compositeSideOf(swe, chartB),
+  );
+
+  const angles = anglesOf(composite);
+  // ノードは中点図に居ないので excludeNodes は要らないが、意図を明示して同じ札を立てておく
+  const chartAspects = natalAspects(aspectPointsOf(composite, { excludeNodes: true }), orb);
+
+  const nameOf = (chart: StoredChart, chartId: string): string =>
+    chart.label ? `${chart.label}（${chartId}）` : chartId;
+  const describe = (chart: StoredChart, chartId: string) => ({
+    chart_id: chartId,
+    label: chart.label,
+    house_system: chart.house_system,
+  });
+
+  const lines: string[] = [
+    "コンポジット（中点図）",
+    `A: ${nameOf(chartA, idA)} / B: ${nameOf(chartB, idB)}`,
+  ];
+  if (chartC && idC !== undefined) lines.push(`C: ${nameOf(chartC, idC)}`);
+  lines.push(
+    `方式: 中点法（ダヴィソンではありません） / ハウス方式: ${houseSystemName(
+      composite.houseSystem,
+    )}（${composite.houseSystem}）`,
+  );
+  if (composite.ascMethod === "asc_midpoint_equal_houses") {
+    lines.push(COMPOSITE_FALLBACK_NOTE);
+  } else if (chartA.house_system !== chartB.house_system) {
+    // 2 枚で方式が違うときだけ「なぜ P なのか」を言い添える
+    lines.push(
+      "※ 2 枚でハウス方式が違うので、中点図はプラシーダス（P）で立てています" +
+        "（どちらか片方を採る理由が無いため）。",
+    );
+  }
+  lines.push("");
+
+  lines.push("■ 中点図の天体（カッコ内は在ハウス・10 天体／ノードは扱いません）");
+  lines.push(...formatCompositePlanetLines(composite.planets, composite.cusps));
+  lines.push(formatAngles(angles));
+  lines.push("");
+
+  lines.push("■ ハウスカスプ");
+  lines.push(formatCuspLine(composite.cusps));
+  lines.push("");
+
+  lines.push(
+    `■ 中点図の中のアスペクト（メジャー5種・オーブ ${orb.toFixed(1)}°・10 天体＋ASC/MC）`,
+  );
+  if (chartAspects.length === 0) {
+    lines.push(`該当なし（オーブ ${orb.toFixed(1)}° の範囲にメジャーアスペクトはありません）`);
+  } else {
+    lines.push(...chartAspects.map((hit) => formatNatalAspect(hit)));
+  }
+  lines.push("");
+
+  let toC: {
+    aspects: ReturnType<typeof synastryAspects>;
+    overlays: {
+      composite_in_c: ReturnType<typeof houseOverlay>;
+      c_in_composite: ReturnType<typeof houseOverlay>;
+    };
+  } | null = null;
+  if (chartC) {
+    const crossAspectsToC = synastryAspects(
+      aspectPointsOf(composite, { excludeNodes: true }),
+      aspectPointsOf(chartC, { excludeNodes: true }),
+      orb,
+    );
+    const compositeInC = houseOverlay(composite.planets, chartC.cusps);
+    const cInComposite = houseOverlay(chartC.planets, composite.cusps);
+    toC = {
+      aspects: crossAspectsToC,
+      overlays: { composite_in_c: compositeInC, c_in_composite: cInComposite },
+    };
+
+    lines.push(
+      `■ 中点図と C のアスペクト（メジャー5種・オーブ ${orb.toFixed(
+        1,
+      )}°・10 天体＋ASC/MC の総当たり、ノード除く）`,
+    );
+    if (crossAspectsToC.length === 0) {
+      lines.push(`該当なし（オーブ ${orb.toFixed(1)}° の範囲にメジャーアスペクトはありません）`);
+    } else {
+      lines.push(...crossAspectsToC.map((hit) => formatPairAspect(hit, "中.", "C.")));
+    }
+    lines.push("");
+
+    lines.push("■ 中点図の天体が C のハウスで（10 天体）");
+    lines.push(formatHouseOverlay(compositeInC));
+    lines.push("");
+
+    lines.push("■ C の天体が中点図のハウスで（ノード込みの 11 天体）");
+    lines.push(formatHouseOverlay(cInComposite));
+    lines.push("");
+  }
+
+  lines.push(formatCompositeConventions(composite));
+  lines.push(COMPOSITE_HOUSE_CAVEAT);
+  lines.push(COMPOSITE_NO_READING_NOTE);
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: {
+      kind: "composite",
+      method: "midpoint",
+      a: describe(chartA, idA),
+      b: describe(chartB, idB),
+      ...(chartC && idC !== undefined ? { c: describe(chartC, idC) } : {}),
+      house_system: composite.houseSystem,
+      orb,
+      planets: composite.planets.map((planet) => ({
+        id: planet.id,
+        name: planetName(planet.id),
+        lon: planet.lon,
+        position: formatDegree(planet.lon),
+        house: getHouse(planet.lon, composite.cusps),
+      })),
+      angles,
+      // 保存形と同じく [0] はダミーなので、返すのは 1..12 の 12 要素だけ
+      cusps: composite.cusps.slice(1, 13),
+      chart_aspects: chartAspects,
+      ...(toC ? { to_c: toC } : {}),
+      conventions: compositeConventions(composite),
     },
   };
 }
@@ -3403,6 +3795,116 @@ async function runFourPillars(rawArguments: unknown, context: AstroContext): Pro
 }
 
 // ---------------------------------------------------------------------------
+// 四柱の多者盤面
+// ---------------------------------------------------------------------------
+
+const PILLARS_RELATIONS_NO_READING_NOTE =
+  "（関係の名前を並べるだけで、点数化も多数決もしていません。相性の良し悪しもこのサーバーに載っていません" +
+  "——読みはあなた自身の知識で。ホロスコープ・宿曜・四柱・九星は別々の体系で、合算する根拠はありません）";
+
+/**
+ * 四柱の多者盤面（2〜4 人）。
+ *
+ * 命式は four_pillars とまったく同じ経路（`sunLongitude` → `calculateFourPillars`）で 1 人ずつ立て、
+ * 盤面の表引きは純関数（src/pillars-relations.ts）に渡す。エンジンを叩くのは
+ * 人数ぶんの `swe_calc_ut`（太陽）だけ ―― 大運を返さないので**節入りは探さない**
+ * （`swe_solcross_ut` を人数 × 2 回ぶん節約している。起運はこの盤面に出てこない）。
+ *
+ * 出生データは返事に出さない ―― 出すのは派生値（干支・空亡と、そのつながりの名前）だけ。
+ * 太陽黄経も出生の瞬間を絞り込む手がかりなので、返り値には混ぜない。
+ */
+async function runPillarsRelations(
+  rawArguments: unknown,
+  context: AstroContext,
+): Promise<ToolResult> {
+  const args = argsOf(rawArguments);
+  const ids = requireChartIds(args, "charts");
+
+  // どれも「呼び出した人の台帳」しか引かない＝他人のチャートは存在ごと見えない
+  const charts: StoredChart[] = [];
+  for (const [index, chartId] of ids.entries()) {
+    const chart = await getChart(context.kv, context.auth.user, chartId);
+    if (!chart) return missingPartyChart(`charts[${index}]`, chartId);
+    if (!chart.birth) {
+      // four_pillars と同じ案内（時柱が要るので、座標だけの古い登録では命式が立たない）
+      return toolError(
+        `charts[${index}] に指定したチャート ${chartId} には出生データが入っていません` +
+          "（出生データを保存しない時代の登録です）。" +
+          "delete_chart で消して save_chart で登録し直すと使えます。",
+      );
+    }
+    charts.push(chart);
+  }
+
+  const swe = await engineOf(context);
+  const parties: PartyInput[] = charts.map((chart, index) => {
+    const birth = chart.birth as NonNullable<StoredChart["birth"]>;
+    // MomentInput と NakkoMoment は同じ形（現地の時計の読み＋時差）
+    const moment: NakkoMoment = {
+      year: birth.year,
+      month: birth.month,
+      day: birth.day,
+      hour: birth.hour,
+      minute: birth.minute,
+      utcOffset: birth.utc_offset,
+    };
+    const sunLon = sunLongitude(swe, moment);
+    let natal: FourPillarsResult;
+    try {
+      natal = calculateFourPillars({ moment, sun_longitude: sunLon });
+    } catch (error) {
+      // 純関数の言い分には出生データの値が混じり得るので、そのままは返さない
+      if (error instanceof FourPillarsError) {
+        throw new AstroError(
+          `charts[${index}] に指定したチャートの出生データからは命式を立てられませんでした` +
+            "（四柱推命は西暦 1〜9999 年の生年月日で立てます。値は返事に出しません）。",
+        );
+      }
+      throw error;
+    }
+    return {
+      // ラベルが空の登録でも人が見分けられるように chart_id で代える
+      label: chart.label || (ids[index] as string),
+      pillars: orderedPillars(natal.pillars),
+      void: natal.void,
+    };
+  });
+
+  let board: PillarsRelationsResult;
+  try {
+    board = calculatePillarsRelations(parties);
+  } catch (error) {
+    // こちらの言い分に出るのは人数と干支だけ（出生データは含まれない）ので、そのまま返してよい
+    if (error instanceof PillarsRelationsError) throw new AstroError(error.message);
+    throw error;
+  }
+
+  const roster = board.parties
+    .map((party, index) => `${party.index}. ${party.label}（${ids[index]}）`)
+    .join(" / ");
+
+  const lines: string[] = [
+    "四柱の多者盤面（子平・日界 0 時・節気は太陽黄経・時刻の補正なし）",
+    `並べたチャート: ${roster}`,
+    PILLARS_RELATIONS_NO_READING_NOTE,
+    "",
+    formatPillarsRelationsText(board),
+  ];
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    structuredContent: {
+      kind: "pillars_relations",
+      charts: ids.map((chartId, index) => ({
+        chart_id: chartId,
+        label: (charts[index] as StoredChart).label,
+      })),
+      ...board,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 九星気学
 // ---------------------------------------------------------------------------
 
@@ -4065,7 +4567,7 @@ async function runTransitEvents(rawArguments: unknown, context: AstroContext): P
 const ASTRO_ARGUMENT_KEYS = allowedArgumentKeys(ASTRO_TOOLS);
 
 /**
- * この入口（/astro/mcp）が公開するツールの明示リスト（allowlist）＝占星術層 17 本＋カード層 5 本の
+ * この入口（/astro/mcp）が公開するツールの明示リスト（allowlist）＝占星術層 19 本＋カード層 5 本の
  * スーパーセット（2026-08-24。無料プランのコネクタ 1 枠でも全部に届くように）。
  * 除外リストではなく「載せるものを列挙して合成する」方式 ―― カード層に共通ツールが増えれば
  * CARD_TOOLS 経由で自動的にここにも載る。逆方向（公開層に個人データの口が混ざる事故）は、
@@ -4109,6 +4611,7 @@ async function callAstroTool(
     }
     if (name === "transit") return await runTransit(rawArguments, context);
     if (name === "synastry") return await runSynastry(rawArguments, context);
+    if (name === "composite") return await runComposite(rawArguments, context);
     if (name === "lunar_return") return await runReturn("moon", rawArguments, context);
     if (name === "solar_return") return await runReturn("sun", rawArguments, context);
     if (name === "progressions") return await runProgressions(rawArguments, context);
@@ -4120,6 +4623,7 @@ async function callAstroTool(
     if (name === "shukuyo") return await runShukuyo(rawArguments, context);
     if (name === "shukuyo_compat") return await runShukuyoCompat(rawArguments, context);
     if (name === "four_pillars") return await runFourPillars(rawArguments, context);
+    if (name === "pillars_relations") return await runPillarsRelations(rawArguments, context);
     if (name === "kyusei") return await runKyusei(rawArguments, context);
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {

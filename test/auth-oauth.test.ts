@@ -179,7 +179,7 @@ describe("OAuth の口（POST /astro/mcp）", () => {
       { email: MEMBER_EMAIL },
     );
     expect(response.status).toBe(200);
-    // 2026-08-24 のスーパーセット化で、この入口には占星術層＋カード層の全 22 本が並ぶ
+    // 2026-08-24 のスーパーセット化で、この入口には占星術層＋カード層の全 24 本が並ぶ
     expect(json.result.tools.map((tool: { name: string }) => tool.name)).toEqual(
       [...ASTRO_TOOLS, ...CARD_TOOLS].map((tool) => tool.name),
     );

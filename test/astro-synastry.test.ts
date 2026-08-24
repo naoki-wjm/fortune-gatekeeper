@@ -317,8 +317,10 @@ describe("synastry", () => {
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
     // 2026-08-22 夜に kyusei が 17 本目として後ろに付いたので、synastry は末尾ではなく 16 番目
-    // （2026-08-24 のスーパーセット化でカード層 5 本がさらに後ろに付き、全 22 本）
-    expect(tools).toHaveLength(22);
+    // （2026-08-24 のスーパーセット化でカード層 5 本がさらに後ろに付き、2026-08-25 の
+    //  composite が 18 本目・pillars_relations が 19 本目に入って全 24 本。
+    //  synastry の位置は 16 番目のまま）
+    expect(tools).toHaveLength(24);
     expect(tools[15]?.name).toBe("synastry");
 
     const tool: any = tools[15];

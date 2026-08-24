@@ -67,6 +67,25 @@ export interface FakeEngine extends SwissEph {
   ayanamsa: number;
   /** swe_set_sid_mode が受け取った引数の記録（engine.ts が一度だけ呼ぶことの検算用） */
   sidModeCalls: { sidMode: number; t0: number; ayanT0: number }[];
+  /**
+   * true にすると `swe_houses_armc` が「渡された ARMC と辻褄の合う MC」を ascmc[1] に返す
+   * （既定の false は FAKE_ARMC_ASCMC の決め打ちのまま＝二次進行のテストが見ている形）。
+   *
+   * コンポジット（中点図）は「立て直した MC が中点 MC と一致するか」を毎回検算するので、
+   * 決め打ちのままでは配線を通せない。カスプは FAKE_ARMC_CUSPS のままにしておく
+   * （偽エンジンで本物らしいハウスを作る意味は無いため）。
+   */
+  armcMatchesMc: boolean;
+}
+
+/**
+ * ARMC → 黄経 MC。chart.ts の `mcToArmc` のちょうど逆で、
+ * `armcMatchesMc` を立てた偽エンジンが往復の辻褄を合わせるために使う。
+ */
+export function armcToMc(armc: number, eps: number): number {
+  const rad = Math.PI / 180;
+  const mc = Math.atan2(Math.sin(armc * rad), Math.cos(armc * rad) * Math.cos(eps * rad)) / rad;
+  return normalizeDegree(mc);
 }
 
 export function makeFakeEngine(): FakeEngine {
@@ -84,6 +103,7 @@ export function makeFakeEngine(): FakeEngine {
     crossFails: false,
     ayanamsa: 0,
     sidModeCalls: [],
+    armcMatchesMc: false,
 
     swe_julday(year: number, month: number, day: number, hour: number, _gregflag: number): number {
       const midnight = Math.floor(Date.UTC(year, month - 1, day) / 86_400_000) + 2440587.5;
@@ -113,7 +133,9 @@ export function makeFakeEngine(): FakeEngine {
 
     swe_houses_armc(armc: number, lat: number, eps: number, hsys: string) {
       fake.armcCalls.push({ armc, lat, eps, hsys });
-      return { cusps: [...FAKE_ARMC_CUSPS], ascmc: [...FAKE_ARMC_ASCMC] };
+      const ascmc = [...FAKE_ARMC_ASCMC];
+      if (fake.armcMatchesMc) ascmc[1] = armcToMc(armc, eps);
+      return { cusps: [...FAKE_ARMC_CUSPS], ascmc };
     },
 
     swe_mooncross_ut(targetLon: number, startJd: number, flags: number): number {

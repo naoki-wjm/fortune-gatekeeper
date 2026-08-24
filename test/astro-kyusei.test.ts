@@ -563,8 +563,9 @@ describe("kyusei", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 2026-08-24 のスーパーセット化でカード層 5 本が後ろに付いたので、全 22 本・kyusei は 17 番目
-    expect(tools).toHaveLength(22);
+    // 2026-08-24 のスーパーセット化でカード層 5 本が、2026-08-25 に composite が 18 本目・
+    // pillars_relations が 19 本目に入ったので全 24 本。kyusei は 17 番目のまま
+    expect(tools).toHaveLength(24);
     expect(tools[16]?.name).toBe("kyusei");
 
     const tool: any = tools[16];
