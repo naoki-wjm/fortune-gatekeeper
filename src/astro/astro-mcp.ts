@@ -27,7 +27,7 @@ import {
 import { ShukuyoError } from "../shukuyo";
 import { AstroError } from "./chart";
 import { type AstroContext, type AstroTool } from "./context";
-import { PRINCIPLE_NO_SUMMING, PRINCIPLE_SERVER_COMPUTES } from "./phrases";
+import { PRINCIPLE_NO_SUMMING, PRINCIPLE_SERVER_COMPUTES } from "../phrases";
 import { type AstroKv, type AuthContext } from "./store";
 import {
   deleteChartTool,
@@ -117,9 +117,11 @@ const ASTRO_INSTRUCTIONS =
   PRINCIPLE_NO_SUMMING +
   "。並べて眺めるのはよいのですが、点数を足したり多数決を取ったりはしないでください。\n" +
   "この入口にはカード占い・易占・アストロダイス・ジオマンシー" +
-  "（list_decks / draw_cards / cast_hexagram / roll_astro_dice / cast_geomancy）も同居しています" +
+  "（list_decks / draw_cards / cast_hexagram / roll_astro_dice / cast_geomancy）と" +
+  "月まわりの暦（moon_calendar＝朔望・月の星座入り・ボイドタイム・食の時刻。こちらは乱数を使わない" +
+  "天体計算です）も同居しています" +
   "——公開の入口と同じもので、シャッフルも出目もサーバー側の乱数、読みはあなた自身の知識で行います。" +
-  "こちらは乱数だけで完結し、この鍵つきの入口から引いても**結果は一切保存されません**" +
+  "こちらは誰の誕生日も預からず、この鍵つきの入口から引いても**結果は一切保存されません**" +
   "（台帳に入るのはチャートだけ）。カード・易・ダイス・ジオマンシーもまた別の体系です" +
   "（上と同じく、合算の根拠にはなりません）。";
 

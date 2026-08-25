@@ -563,9 +563,9 @@ describe("kyusei", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
-    // kyusei は誕生日系の科の末尾＝占星術層の 19 番目（この後ろはカード層 5 本）
-    expect(tools).toHaveLength(24);
+    // 占星術層 19 本＋カード層 6 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // kyusei は誕生日系の科の末尾＝占星術層の 19 番目（この後ろはカード層 6 本）
+    expect(tools).toHaveLength(25);
     expect(tools[18]?.name).toBe("kyusei");
 
     const tool: any = tools[18];

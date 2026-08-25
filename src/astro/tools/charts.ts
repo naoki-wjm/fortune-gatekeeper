@@ -31,7 +31,7 @@ import {
   type AstroContext,
   type AstroTool,
 } from "../context";
-import { missingChartMessage } from "../phrases";
+import { missingChartMessage } from "../../phrases";
 import {
   createChart,
   deleteChart,

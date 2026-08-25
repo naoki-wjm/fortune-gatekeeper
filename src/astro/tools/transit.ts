@@ -44,7 +44,7 @@ import {
   type AstroContext,
   type AstroTool,
 } from "../context";
-import { missingChartMessage } from "../phrases";
+import { missingChartMessage } from "../../phrases";
 import {
   BODY_SET_LABEL,
   MAX_DAYS,

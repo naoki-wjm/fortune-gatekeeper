@@ -24,6 +24,16 @@ import {
 } from "./astro-dice";
 import { castGeomancy, formatShieldChartText } from "./geomancy";
 import {
+  MOON_CALENDAR_DEFAULT_DAYS,
+  MOON_CALENDAR_DEFAULT_UTC_OFFSET,
+  MOON_CALENDAR_MAX_DAYS,
+  MOON_CALENDAR_MIN_DAYS,
+  VOC_BODY_SETS,
+  moonCalendar,
+  parseMoonCalendarArguments,
+} from "./moon-calendar";
+import { PRINCIPLE_NO_SUMMING, READ_WITH_YOUR_OWN_KNOWLEDGE } from "./phrases";
+import {
   DEFAULT_UTC_OFFSET,
   assertCalendarDay,
   buildNakko,
@@ -58,7 +68,9 @@ const SERVER_INSTRUCTIONS =
   "アストロダイス（roll_astro_dice）も振れます——天体 × 星座 × ハウスの名前の組だけを返すので、" +
   "意味はあなたの知識で。" +
   "ジオマンシー（cast_geomancy）も立てられます——16 図形の名前と点の並びだけを返すので、" +
-  "意味はあなたの知識で。";
+  "意味はあなたの知識で。" +
+  "月まわりの暦（moon_calendar）も引けます——朔望・月の星座入り・ボイドタイム・食の時刻だけを" +
+  "期間でまとめて返すので、意味はあなたの知識で。";
 
 /** 相手が名乗ってきたバージョンがこの中にあればそれに合わせる */
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -367,6 +379,73 @@ export const TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "moon_calendar",
+    title: "月まわりの暦（朔望・星座入り・ボイド・食）",
+    description:
+      "月まわりの暦を期間でまとめて返す——新月・上弦・満月・下弦の瞬間、月の星座入り、" +
+      "ボイドタイム（ボイド・オブ・コース）、期間内の日食・月食。乱数は使わない天体計算で、" +
+      "誕生日も場所も受け取らない（誰が呼んでも同じ答えになる）。\n" +
+      "計算するのはサーバー、" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "——返すのは時刻と星座と名前だけで、" +
+      "「ボイド中は何をすべきか」のような吉凶・過ごし方は 1 文字も載せない。\n" +
+      "採った規約（返り値の conventions にも名前で入る）: " +
+      "ボイド＝月がその星座で相手天体と**最後に exact なメジャーアスペクト**" +
+      "（0 / 60 / 90 / 120 / 180 度）を作った瞬間から、**次の星座に入る瞬間**まで。" +
+      "オーブは取らない（exact ちょうどが境目）。相手天体は既定の modern が" +
+      "太陽・水星・金星・火星・木星・土星・天王星・海王星・冥王星の 9 天体、" +
+      "traditional が土星までの 7 天体で、どちらもノードは含めない。\n" +
+      "⚠ **ボイドの定義は流派で割れる**（相手天体の範囲・オーブを取るかどうか・" +
+      "「その星座を出るまで」と数えるか「次のアスペクトまで」と数えるか）。" +
+      "このサーバーは上の 1 通りだけを採るので、別の流派の表とは時刻が食い違うことがある。\n" +
+      "食は global＝地球上のどこかで起きるもの（場所を受けないので「どこで見えるか」は返さない）。" +
+      "半影月食も入れる（type で見分けがつく）。黄道はトロピカル、天体計算は Moshier。\n" +
+      "期間の頭より前に始まったボイドも、期間の尻をはみ出して終わるボイドも切らずに実時刻で返す" +
+      "（開始時点でボイド中かどうかが分かるように）。\n" +
+      "⚠ " +
+      PRINCIPLE_NO_SUMMING +
+      "。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        start: {
+          type: "string",
+          description:
+            '期間の頭を "YYYY-MM-DD" で（例: 2026-08-25）。その日の 0 時から数える。' +
+            "省略すると utc_offset の暦での今日。",
+        },
+        days: {
+          type: "integer",
+          minimum: MOON_CALENDAR_MIN_DAYS,
+          maximum: MOON_CALENDAR_MAX_DAYS,
+          default: MOON_CALENDAR_DEFAULT_DAYS,
+          description:
+            `何日ぶん見るか（既定 ${MOON_CALENDAR_DEFAULT_DAYS}・` +
+            `最大 ${MOON_CALENDAR_MAX_DAYS} ＝ 2 朔望月ぶん）。`,
+        },
+        utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          default: MOON_CALENDAR_DEFAULT_UTC_OFFSET,
+          description:
+            `どの土地の時計で読むか（既定 ${MOON_CALENDAR_DEFAULT_UTC_OFFSET}＝日本時間）。` +
+            "返す時刻はすべてこの時差の現地時刻で、+09:00 のような札が付く。",
+        },
+        voc_bodies: {
+          type: "string",
+          enum: VOC_BODY_SETS,
+          default: "modern",
+          description:
+            "ボイド判定の相手天体（既定 modern）。modern＝太陽・水星〜冥王星の 9 天体 / " +
+            "traditional＝太陽・水星〜土星の 7 天体（近代以降に見つかった 3 つを外す流派）。",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -601,16 +680,20 @@ function parseCastArguments(raw: unknown, now: Date): CastRequest {
   };
 }
 
-/** 納甲の太陽黄経を出すためのエンジン。nakko を使わない限り呼ばれない */
-async function engineOf(context: CardContext): Promise<SwissEph> {
+/**
+ * 天体計算のエンジン。カード層でこれが要るのは納甲（cast_hexagram の nakko: true）と
+ * 月まわりの暦（moon_calendar）だけなので、断り文の主語（何が出せないか・何のためのエンジンか）は
+ * 呼び出し側から渡してもらう。
+ */
+async function engineOf(context: CardContext, cannot: string, purpose: string): Promise<SwissEph> {
   if (!context.getEngine) {
-    throw new CastError("この呼び出しでは天体計算エンジンが使えないため納甲を出せません");
+    throw new CastError(`この呼び出しでは天体計算エンジンが使えないため${cannot}`);
   }
   try {
     return await context.getEngine();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new CastError(`納甲の月支を出す天体計算エンジンを初期化できませんでした: ${detail}`);
+    throw new CastError(`${purpose}天体計算エンジンを初期化できませんでした: ${detail}`);
   }
 }
 
@@ -630,7 +713,7 @@ async function runCastHexagram(
     };
   }
 
-  const swe = await engineOf(context);
+  const swe = await engineOf(context, "納甲を出せません", "納甲の月支を出す");
   const nakko = buildNakko(result, request.nakko, sunLongitude(swe, request.nakko));
   return {
     content: [
@@ -671,6 +754,19 @@ function runCastGeomancy(): ToolResult {
   };
 }
 
+/**
+ * 月まわりの暦。この層で唯一「乱数を 1 ビットも使わない」ツールで、誕生日も場所も受けない
+ * （誰が呼んでも同じ答え＝公開層に置いてよい、という線引きの側）。
+ */
+async function runMoonCalendar(rawArguments: unknown, context: CardContext): Promise<ToolResult> {
+  const now = context.now ? context.now() : new Date();
+  // 引数の検算はエンジンより先（断るだけなら wasm に触らずに済む）
+  const request = parseMoonCalendarArguments(rawArguments, now);
+  const swe = await engineOf(context, "月まわりの暦を出せません", "月と太陽の位置を出す");
+  const { result, text } = moonCalendar(swe, request);
+  return { content: [{ type: "text", text }], structuredContent: result };
+}
+
 /** カード層のツールごとの許可キー（ツール定義から自動で導く） */
 const CARD_ARGUMENT_KEYS = allowedArgumentKeys(TOOLS);
 
@@ -700,6 +796,7 @@ export async function callTool(
     if (name === "cast_hexagram") return await runCastHexagram(rawArguments, context);
     if (name === "roll_astro_dice") return runRollAstroDice(rawArguments);
     if (name === "cast_geomancy") return runCastGeomancy();
+    if (name === "moon_calendar") return await runMoonCalendar(rawArguments, context);
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
     if (
@@ -834,7 +931,8 @@ export async function readJsonRpcRequest(
  * カード層に外から差し込むもの。
  *
  * カード占い・易・ダイス・ジオマンシーは乱数だけで完結するので、ここが要るのは
- * **納甲（cast_hexagram の nakko: true）だけ** ―― 月支と年の境に太陽黄経が要る。
+ * **納甲（cast_hexagram の nakko: true）と月まわりの暦（moon_calendar）** ―― 納甲は月支と年の境に
+ * 太陽黄経が、月まわりの暦は月と太陽の位置・星座入り・食が要る。
  * 占星術層の AstroContext と同じものを index.ts から渡している。
  */
 export interface CardContext {

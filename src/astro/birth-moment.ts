@@ -9,7 +9,7 @@ import { toolError, type ToolResult } from "../mcp";
 import { AstroError, type MomentInput } from "./chart";
 import { assertCalendarDay, utcDateFromLocal } from "./calendar";
 import { type AstroContext } from "./context";
-import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "./phrases";
+import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../phrases";
 import { getChart } from "./store";
 import { optionalInteger, optionalNumber, optionalString } from "./tool-args";
 

@@ -6,7 +6,7 @@
  */
 import { toolError, type ToolResult } from "../mcp";
 import { AstroError, anglesOf, planetName, type AspectPoint, type SwissEph } from "./chart";
-import { missingChartMessage } from "./phrases";
+import { missingChartMessage } from "../phrases";
 import { type AstroKv, type AuthContext, type StoredChart } from "./store";
 
 /**

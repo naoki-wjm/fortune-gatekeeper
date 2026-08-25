@@ -16,6 +16,16 @@ export interface HouseResult {
   ascmc: number[];
 }
 
+/**
+ * swe_sol_eclipse_where の戻り。data は地表の位置（[0] 経度・[1] 緯度…）、
+ * Array は食の属性 11 要素（[0] 太陽直径の食された割合・**[1] 月と太陽の視直径比**…）。
+ * 名前が `Array` なのは wrapper 側の綴りそのまま（複製ファイルには手を入れない方針）。
+ */
+export interface SolarEclipseWhere {
+  data: number[];
+  Array: number[];
+}
+
 export default class SwissEPH {
   constructor(emscripten: EmscriptenModule);
 
@@ -27,6 +37,35 @@ export default class SwissEPH {
 
   /** ハウスカスプ。hsys は 1 文字（P / K / W / E など） */
   swe_houses(jd: number, lat: number, lng: number, hsys: string): HouseResult;
+
+  /**
+   * 次の日食（**global**＝地球上のどこかで起きるもの）を探す。戻りは tret 10 要素で
+   * [0] 食の最大・[2][3] 食の始まりと終わり・[4][5] 皆既／金環の始まりと終わり・
+   * [6][7] 中心線の始まりと終わり。ifltype = 0 で種類を問わない。
+   * ⚠ **C 関数の戻り値（SE_ECL_TOTAL などの種類のビット）は wrapper が捨てている**ので、
+   *    種類は tret と swe_sol_eclipse_where から導く（src/moon-calendar.ts の eclipseTypeOf）。
+   */
+  swe_sol_eclipse_when_glob(
+    startJd: number,
+    flags: number,
+    ifltype: number,
+    backward: boolean,
+  ): number[];
+
+  /**
+   * 次の月食。戻りは tret 8 要素で [0] 食の最大・[2][3] 部分食の始まりと終わり・
+   * [4][5] 皆既の始まりと終わり・[6][7] 半影食の始まりと終わり。
+   * こちらは 0 かどうかだけで皆既／部分／半影が分かる。
+   */
+  swe_lun_eclipse_when(
+    startJd: number,
+    flags: number,
+    ifltype: number,
+    backward: boolean,
+  ): number[];
+
+  /** その瞬間の日食を地表のどこで見るか＋属性（金環と皆既の見分けに Array[1] を使う） */
+  swe_sol_eclipse_where(jd: number, flags: number): SolarEclipseWhere;
 
   /** Swiss Ephemeris のバージョン文字列 */
   swe_version(): string;

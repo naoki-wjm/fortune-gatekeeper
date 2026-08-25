@@ -52,7 +52,7 @@ import {
   noReadingNote,
   PRINCIPLE_NO_SUMMING,
   READ_WITH_YOUR_OWN_KNOWLEDGE,
-} from "../phrases";
+} from "../../phrases";
 import { crossUt } from "../returns";
 import { getChart, isChartId } from "../store";
 import { argsOf, optionalNumber, optionalString, requireString } from "../tool-args";

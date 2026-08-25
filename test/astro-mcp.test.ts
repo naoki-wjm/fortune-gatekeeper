@@ -211,7 +211,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("24 本のツールを返す（占星術層 19 本＋カード層 5 本のスーパーセット）", async () => {
+  it("25 本のツールを返す（占星術層 19 本＋カード層 6 本のスーパーセット）", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -238,12 +238,13 @@ describe("占星術層の initialize / tools/list", () => {
       "four_pillars",
       "pillars_relations",
       "kyusei",
-      // ここからカード層 5 本の同居（2026-08-24 スーパーセット化。定義は公開層と同一）
+      // ここからカード層 6 本の同居（2026-08-24 スーパーセット化。定義は公開層と同一）
       "list_decks",
       "draw_cards",
       "cast_hexagram",
       "roll_astro_dice",
       "cast_geomancy",
+      "moon_calendar",
     ]);
     // 名前はどれも一意（カード層と占星術層で重ならない）
     expect(new Set(names).size).toBe(names.length);
@@ -332,6 +333,7 @@ describe("ルーティング（カード層と 404）", () => {
       "cast_hexagram",
       "roll_astro_dice",
       "cast_geomancy",
+      "moon_calendar",
     ]);
   });
 
@@ -3475,7 +3477,7 @@ describe("chart_id の衝突回避", () => {
  * - 2026-08-25 四柱の多者盤面 pillars_relations（19 本目）を末尾に追加で更新
  *   （既存 18 本は 1 文字も動かしていない）
  * - 2026-08-25 歴史順から**科ごとの並び**へ組み替え（出生図の台帳 → 天体系 → 2 枚以上の図 →
- *   誕生日系）。あわせて「鯖の憲法 3 条」（src/astro/phrases.ts）に文言を寄せたぶんだけ
+ *   誕生日系）。あわせて「鯖の憲法 3 条」（src/phrases.ts）に文言を寄せたぶんだけ
  *   description を更新＝合算の話の 6 本（shukuyo / shukuyo_compat / four_pillars / kyusei /
  *   pillars_relations）と、規約の頭の言い回し（pillars_relations / composite）。
  *   「三体系」「四体系」の語はここから消えた（体系は増えるので数を書かない）

@@ -504,9 +504,9 @@ describe("composite と出生データ", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // 占星術層 19 本＋カード層 6 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
     // composite は「2 枚以上の図」の科の 2 本目＝ 13 番目（synastry の次）
-    expect(tools).toHaveLength(24);
+    expect(tools).toHaveLength(25);
     expect(tools[12]?.name).toBe("composite");
 
     const tool: any = tools[12];

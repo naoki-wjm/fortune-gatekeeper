@@ -15,7 +15,7 @@ import {
 import { AstroError } from "../chart";
 import { assertCalendarDay } from "../calendar";
 import { type AstroContext, type AstroTool } from "../context";
-import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../phrases";
+import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../../phrases";
 import { getChart } from "../store";
 import {
   argsOf,

@@ -23,6 +23,24 @@ export const FAKE_ARMC_ASCMC = [100, 310, 0, 0, 0, 0, 0, 0];
 /** 偽エンジンが返す黄道傾斜（swe_calc_ut の planetId = -1） */
 export const FAKE_EPS = 23.44;
 
+/**
+ * 「この先に食は無い」ときに偽エンジンが返す最大時刻の遠さ（日）。
+ * 本物は次の食まで走るので、期間より十分先を返して「期間内には無い」を作る。
+ */
+export const FAKE_NO_ECLIPSE_DAYS = 400;
+
+/** 偽エンジンに仕込む日食（jd の昇順で並べること） */
+export interface FakeSolarEclipse {
+  jd: number;
+  type: "total" | "annular" | "partial" | "hybrid";
+}
+
+/** 偽エンジンに仕込む月食（同上） */
+export interface FakeLunarEclipse {
+  jd: number;
+  type: "total" | "partial" | "penumbral";
+}
+
 /** sunMotionAnchorJd を立てたときの太陽の 1 周（日）。本物と同じ回帰年 */
 export const FAKE_TROPICAL_YEAR = 365.2422;
 
@@ -76,6 +94,14 @@ export interface FakeEngine extends SwissEph {
    * （偽エンジンで本物らしいハウスを作る意味は無いため）。
    */
   armcMatchesMc: boolean;
+  /**
+   * swe_sol_eclipse_when_glob / swe_lun_eclipse_when が返す食（既定は空＝どの期間にも食が無い）。
+   * **jd の昇順**で入れること（本物と同じく「探索開始より後の最初の 1 つ」を返す作り）。
+   * tret の形は本物に合わせてあり、日食は中心線の有無＋視直径比で、月食は tret の 0 の位置だけで
+   * 種類が読める ―― moon-calendar.ts の種類判定はそこしか見ていない。
+   */
+  solarEclipses: FakeSolarEclipse[];
+  lunarEclipses: FakeLunarEclipse[];
 }
 
 /**
@@ -104,6 +130,8 @@ export function makeFakeEngine(): FakeEngine {
     ayanamsa: 0,
     sidModeCalls: [],
     armcMatchesMc: false,
+    solarEclipses: [],
+    lunarEclipses: [],
 
     swe_julday(year: number, month: number, day: number, hour: number, _gregflag: number): number {
       const midnight = Math.floor(Date.UTC(year, month - 1, day) / 86_400_000) + 2440587.5;
@@ -161,6 +189,70 @@ export function makeFakeEngine(): FakeEngine {
     // jd に依らず同じ値（本物は 50″/年ほど動くが、偽エンジンで時間を持たせる必要は無い）
     swe_get_ayanamsa_ut(_jd: number): number {
       return fake.ayanamsa;
+    },
+
+    swe_sol_eclipse_when_glob(
+      startJd: number,
+      _flags: number,
+      _ifltype: number,
+      _backward: boolean,
+    ): number[] {
+      const tret = new Array<number>(10).fill(0);
+      const entry = fake.solarEclipses.find((eclipse) => eclipse.jd > startJd);
+      if (!entry) {
+        tret[0] = startJd + FAKE_NO_ECLIPSE_DAYS;
+        return tret;
+      }
+      tret[0] = entry.jd;
+      tret[2] = entry.jd - 0.05;
+      tret[3] = entry.jd + 0.05;
+      // 部分日食だけ中心線を持たない（tret[4] / tret[5] が 0 のまま）
+      if (entry.type !== "partial") {
+        tret[4] = entry.jd - 0.02;
+        tret[5] = entry.jd + 0.02;
+        tret[6] = entry.jd - 0.02;
+        tret[7] = entry.jd + 0.02;
+      }
+      return tret;
+    },
+
+    swe_lun_eclipse_when(
+      startJd: number,
+      _flags: number,
+      _ifltype: number,
+      _backward: boolean,
+    ): number[] {
+      const tret = new Array<number>(8).fill(0);
+      const entry = fake.lunarEclipses.find((eclipse) => eclipse.jd > startJd);
+      if (!entry) {
+        tret[0] = startJd + FAKE_NO_ECLIPSE_DAYS;
+        return tret;
+      }
+      tret[0] = entry.jd;
+      tret[6] = entry.jd - 0.1; // 半影食はどの月食にもある
+      tret[7] = entry.jd + 0.1;
+      if (entry.type !== "penumbral") {
+        tret[2] = entry.jd - 0.07;
+        tret[3] = entry.jd + 0.07;
+      }
+      if (entry.type === "total") {
+        tret[4] = entry.jd - 0.03;
+        tret[5] = entry.jd + 0.03;
+      }
+      return tret;
+    },
+
+    /**
+     * 月と太陽の視直径比（Array[1]）だけ本物らしく返す。
+     * ハイブリッドは中心線の始まり・終わり（±0.02 日）で 1 を割り、最大では 1 を超える
+     * ―― これが本物の「経路の端では金環・真ん中では皆既」の形。
+     */
+    swe_sol_eclipse_where(jd: number, _flags: number): { data: number[]; Array: number[] } {
+      const entry = fake.solarEclipses.find((eclipse) => Math.abs(eclipse.jd - jd) <= 0.05);
+      let ratio = 1.04;
+      if (entry?.type === "annular") ratio = 0.96;
+      else if (entry?.type === "hybrid") ratio = Math.abs(entry.jd - jd) > 0.01 ? 0.99 : 1.01;
+      return { data: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], Array: [0.9, ratio, 0, 0, 0, 0, 0, 0, 0, 0, 0] };
     },
   };
 

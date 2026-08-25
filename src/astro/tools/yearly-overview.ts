@@ -22,7 +22,7 @@ import {
   pad,
 } from "../calendar";
 import { engineOf, type AstroContext, type AstroTool } from "../context";
-import { missingChartMessage } from "../phrases";
+import { missingChartMessage } from "../../phrases";
 import { crossUt } from "../returns";
 import { getChart } from "../store";
 import { argsOf, optionalInteger, optionalNumber, requireString } from "../tool-args";

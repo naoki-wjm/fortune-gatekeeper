@@ -23,7 +23,7 @@ import {
 } from "../chart";
 import { assertCalendarDay, formatOffsetLabel, pad } from "../calendar";
 import { aspectPointsOf, engineOf, type AstroContext, type AstroTool } from "../context";
-import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../phrases";
+import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../../phrases";
 import { computeProgression, formatAge, formatArc } from "../returns";
 import { getChart } from "../store";
 import { argsOf, optionalInteger, optionalNumber, requireString } from "../tool-args";

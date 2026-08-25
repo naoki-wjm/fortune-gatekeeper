@@ -152,7 +152,7 @@ describe("initialize", () => {
 });
 
 describe("tools/list", () => {
-  it("5 本のツールを返す", async () => {
+  it("6 本のツールを返す", async () => {
     const { json } = await post({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -161,6 +161,7 @@ describe("tools/list", () => {
       "cast_hexagram",
       "roll_astro_dice",
       "cast_geomancy",
+      "moon_calendar",
     ]);
 
     const cast = json.result.tools[2];
@@ -1036,7 +1037,7 @@ describe("ルーティング", () => {
     expect(guide).toContain("fortune-gatekeeper");
     // ツールの列挙は tools/list と食い違わせない
     expect(guide).toContain(
-      "list_decks, draw_cards, cast_hexagram, roll_astro_dice, cast_geomancy",
+      "list_decks, draw_cards, cast_hexagram, roll_astro_dice, cast_geomancy, moon_calendar",
     );
     expect(guide).toContain("ジオマンシー");
     // 数秘術は鍵つき側なので、案内文でも「ここには無い」としか言わない

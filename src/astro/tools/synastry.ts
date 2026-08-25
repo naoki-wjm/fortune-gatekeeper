@@ -44,7 +44,7 @@ import {
   noReadingNote,
   PRINCIPLE_CONVENTIONS_ARE_NAMED,
   READ_WITH_YOUR_OWN_KNOWLEDGE,
-} from "../phrases";
+} from "../../phrases";
 import { getChart, type StoredChart } from "../store";
 import { argsOf, optionalNumber, optionalString, requireString } from "../tool-args";
 

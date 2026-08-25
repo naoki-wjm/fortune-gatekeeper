@@ -62,6 +62,36 @@ export interface SwissEph {
    * **サイデリアル黄経 = トロピカル黄経 − これ**（src/shukuyo.ts の toSidereal）。
    */
   swe_get_ayanamsa_ut(jd: number): number;
+  /**
+   * 次の日食（**global**＝地球上のどこかで起きるもの。場所は受けない）。
+   * 戻りは tret 10 要素で [0] 食の最大・[2][3] 食の始まりと終わり・
+   * [4][5] 皆既／金環の始まりと終わり・[6][7] 中心線の始まりと終わり。ifltype = 0 で全種類。
+   * ⚠ **種類（SE_ECL_TOTAL などのビット）は C 関数の戻り値**で、wrapper がそれを捨てている。
+   *    種類は tret と swe_sol_eclipse_where から導くこと（src/moon-calendar.ts の solarEclipseType）。
+   */
+  swe_sol_eclipse_when_glob(
+    startJd: number,
+    flags: number,
+    ifltype: number,
+    backward: boolean,
+  ): number[];
+  /**
+   * 次の月食。戻りは tret 8 要素で [0] 食の最大・[2][3] 部分食の始まりと終わり・
+   * [4][5] 皆既の始まりと終わり・[6][7] 半影食の始まりと終わり。
+   * 皆既／部分／半影は [4] と [2] が 0 かどうかで分かる（日食と違って戻り値が要らない）。
+   */
+  swe_lun_eclipse_when(
+    startJd: number,
+    flags: number,
+    ifltype: number,
+    backward: boolean,
+  ): number[];
+  /**
+   * その瞬間の日食を地表のどこで見るか＋属性。
+   * `Array[1]` が月と太陽の視直径比で、1 より大きければ皆既・小さければ金環
+   * （綴りが `Array` なのは wrapper のまま。複製ファイルには手を入れない方針）。
+   */
+  swe_sol_eclipse_where(jd: number, flags: number): { data: number[]; Array: number[] };
 }
 
 /** 入力が受け付けられなかったときのエラー（JSON-RPC ではなく isError で返す） */

@@ -316,9 +316,9 @@ describe("synastry", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // 占星術層 19 本＋カード層 6 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
     // synastry は「2 枚以上の図」の科の頭＝ 12 番目（composite が 13 番目で続く）
-    expect(tools).toHaveLength(24);
+    expect(tools).toHaveLength(25);
     expect(tools[11]?.name).toBe("synastry");
 
     const tool: any = tools[11];

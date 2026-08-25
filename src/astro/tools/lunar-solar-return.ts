@@ -35,7 +35,7 @@ import {
   monthStartJd,
 } from "../calendar";
 import { aspectPointsOf, engineOf, type AstroContext, type AstroTool } from "../context";
-import { missingChartMessage } from "../phrases";
+import { missingChartMessage } from "../../phrases";
 import { crossUt, crossingsInRange, type ReturnKind } from "../returns";
 import { getChart, type StoredChart } from "../store";
 import {

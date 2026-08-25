@@ -385,9 +385,9 @@ describe("pillars_relations と出生データ", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // 占星術層 19 本＋カード層 6 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
     // pillars_relations は four_pillars の次＝ 18 番目（誕生日系の科の末尾は kyusei）
-    expect(tools).toHaveLength(24);
+    expect(tools).toHaveLength(25);
     expect(tools[17]?.name).toBe("pillars_relations");
 
     const tool: any = tools[17];

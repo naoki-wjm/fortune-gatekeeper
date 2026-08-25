@@ -55,7 +55,7 @@ import {
   PRINCIPLE_CONVENTIONS_ARE_NAMED,
   PRINCIPLE_NO_SUMMING,
   READ_WITH_YOUR_OWN_KNOWLEDGE,
-} from "../phrases";
+} from "../../phrases";
 import { crossUt } from "../returns";
 import { argsOf, optionalNumber, optionalString } from "../tool-args";
 
