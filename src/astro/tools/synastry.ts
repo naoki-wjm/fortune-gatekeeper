@@ -40,6 +40,11 @@ import {
   type AstroContext,
   type AstroTool,
 } from "../context";
+import {
+  noReadingNote,
+  PRINCIPLE_CONVENTIONS_ARE_NAMED,
+  READ_WITH_YOUR_OWN_KNOWLEDGE,
+} from "../phrases";
 import { getChart, type StoredChart } from "../store";
 import { argsOf, optionalNumber, optionalString, requireString } from "../tool-args";
 
@@ -48,8 +53,7 @@ import { argsOf, optionalNumber, optionalString, requireString } from "../tool-a
 // ---------------------------------------------------------------------------
 
 /** シナストリーの末尾に置く 1 行（解釈はサーバーの仕事ではない） */
-const SYNASTRY_NO_READING_NOTE =
-  "（相性の良し悪しも組み合わせの意味もこのサーバーに載っていません。読みはあなた自身の知識で）";
+const SYNASTRY_NO_READING_NOTE = noReadingNote("相性の良し悪しや組み合わせの意味");
 
 /**
  * シナストリー（2 枚の出生図の間のアスペクトと在ハウス）。
@@ -149,8 +153,7 @@ async function runSynastry(rawArguments: unknown, context: AstroContext): Promis
 // ---------------------------------------------------------------------------
 
 /** コンポジットの末尾に置く 1 行（解釈はサーバーの仕事ではない） */
-const COMPOSITE_NO_READING_NOTE =
-  "（相性の良し悪しも組み合わせの意味もこのサーバーに載っていません。読みはあなた自身の知識で）";
+const COMPOSITE_NO_READING_NOTE = noReadingNote("相性の良し悪しや組み合わせの意味");
 
 /** 中点図のハウスは参考程度、という通説（サーバーの言い分ではなく前提の共有） */
 const COMPOSITE_HOUSE_CAVEAT =
@@ -375,7 +378,8 @@ export const synastryTool: AstroTool = {
       "位置が要るときは get_chart で 1 枚ずつ読むこと" +
       "（1 枚の図の中のアスペクトも get_chart の持ち場）。\n" +
       "このツールは解釈をしない——相性の良し悪しも組み合わせの意味もサーバーに載せていないので、" +
-      "読みはあなた自身の知識で。\n" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "。\n" +
       "出生データそのものは返事に出さない（アスペクトと在ハウスの派生値だけを返す）。",
     inputSchema: {
       type: "object",
@@ -423,7 +427,7 @@ export const compositeTool: AstroTool = {
       "（メジャー5種＝合・セクスタイル・スクエア・トライン・オポジション、既定オーブ 5°＝orb で変えられる。" +
       "10 天体＋ASC/MC）、(4) c があれば中点図 × C の総当たりアスペクトと、" +
       "互いのハウスに相手の天体がどう入るか（ハウスオーバーレイ）。\n" +
-      "**採った規約は名前で固定して返り値にも書く**（流派で割れるところなので）——" +
+      PRINCIPLE_CONVENTIONS_ARE_NAMED +
       "中点は短い方の弧の真ん中（ぴったり 180° のときだけ A から黄経が増える向きに 90°）/ " +
       "ASC とカスプは中点 MC を ARMC に直し、**2 人の出生緯度の平均**で立て直す" +
       "（黄道傾斜は 2 人の出生時刻の中間時点のもの）/ " +
@@ -433,7 +437,8 @@ export const compositeTool: AstroTool = {
       "⚠ **中点図のハウスは参考程度**、というのが通説（中点図には「立てた場所と時刻」が無く、" +
       "ASC とカスプは 2 人の緯度の平均から作った仮のもの）。天体と天体のアスペクトのほうが芯にある。\n" +
       "このツールは解釈をしない——相性の良し悪しも組み合わせの意味もサーバーに載せていないので、" +
-      "読みはあなた自身の知識で。\n" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "。\n" +
       "出生データそのものは返事に出さない（中点の座標という派生値だけを返し、" +
       "A / B それぞれの天体の黄経も、出生地の緯度も中間緯度も出さない）。",
     inputSchema: {

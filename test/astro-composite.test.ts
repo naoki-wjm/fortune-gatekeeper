@@ -493,7 +493,7 @@ describe("composite と出生データ", () => {
     expect(structured).not.toContain('"speed"');
   });
 
-  it("tools/list に 18 本目として並ぶ（凍結した定義と同じ形）", async () => {
+  it("tools/list に 13 本目として並ぶ（凍結した定義と同じ形）", async () => {
     const response = await handleAstroMcpRequest(
       new Request("http://localhost/astro/mcp", {
         method: "POST",
@@ -504,12 +504,12 @@ describe("composite と出生データ", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 5 本のスーパーセット。composite は 18 番目
-    // （2026-08-25 に pillars_relations が 19 本目として後ろに付いた）
+    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // composite は「2 枚以上の図」の科の 2 本目＝ 13 番目（synastry の次）
     expect(tools).toHaveLength(24);
-    expect(tools[17]?.name).toBe("composite");
+    expect(tools[12]?.name).toBe("composite");
 
-    const tool: any = tools[17];
+    const tool: any = tools[12];
     expect(tool.title).toBe("コンポジット（2 枚の中点図）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["a", "b", "c", "orb"]);
     expect(tool.inputSchema.required).toEqual(["a", "b"]);

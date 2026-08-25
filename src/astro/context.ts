@@ -6,6 +6,7 @@
  */
 import { toolError, type ToolResult } from "../mcp";
 import { AstroError, anglesOf, planetName, type AspectPoint, type SwissEph } from "./chart";
+import { missingChartMessage } from "./phrases";
 import { type AstroKv, type AuthContext, type StoredChart } from "./store";
 
 /**
@@ -120,8 +121,5 @@ export function aspectPointsOf(
  * key は引数名そのもの（"a" / "b" / "c" / "charts[0]" …）。
  */
 export function missingPartyChart(key: string, chartId: string): ToolResult {
-  return toolError(
-    `${key} に指定したチャート ${chartId} が見つかりませんでした。` +
-      "list_charts で登録済みの ID を確かめるか、save_chart で登録してください。",
-  );
+  return toolError(`${key} に指定した` + missingChartMessage(chartId));
 }

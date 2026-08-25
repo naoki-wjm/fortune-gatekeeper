@@ -27,6 +27,7 @@ import {
 import { ShukuyoError } from "../shukuyo";
 import { AstroError } from "./chart";
 import { type AstroContext, type AstroTool } from "./context";
+import { PRINCIPLE_NO_SUMMING, PRINCIPLE_SERVER_COMPUTES } from "./phrases";
 import { type AstroKv, type AuthContext } from "./store";
 import {
   deleteChartTool,
@@ -52,9 +53,8 @@ export { type AstroContext };
 /** 占星術層の initialize に載せる注意書き（カード層とは別文） */
 const ASTRO_INSTRUCTIONS =
   "ホロスコープ（西洋占星術）の天体位置を計算するサーバーです。" +
-  "計算するのはサーバー、読むのは会話中のあなた——返すのは天体の黄経・ハウス・アスペクトといった" +
-  "座標と角度だけで、解釈は一切しません。読み解きはあなた自身の知識で行ってください。" +
-  "自分で「計算したふり」をせず、天体の位置が要る場面では必ずこのツールを呼ぶこと。\n" +
+  PRINCIPLE_SERVER_COMPUTES +
+  "\n" +
   "チャートは save_chart で一度登録すると chart_id で何度でも呼び出せます。" +
   "保存されるのは計算済みの座標（天体の黄経と速度・ハウスカスプ・ASC/MC・ラベル・ハウス方式）で、" +
   "**出生データ（日時・時差・緯度経度）も計算済みの座標と一緒にこの鍵の台帳に預かります**" +
@@ -113,44 +113,49 @@ const ASTRO_INSTRUCTIONS =
   "**宿の意味はサーバーに載せていません**——読みはあなた自身の知識で。" +
   "四柱推命も同じで、通変星・十二運・蔵干・大運の意味は載せていません。\n" +
   "progressions も chart_id で呼べます（出生データを預かっているチャートが要ります）。\n" +
-  "⚠ ホロスコープ・宿曜・四柱・九星はそれぞれ別の体系です。並べて眺めるのはよいのですが、" +
-  "**四体系（ホロスコープ・宿曜・四柱・九星）を合算する根拠はありません**" +
-  "——点数を足したり多数決を取ったりしないでください。\n" +
+  "⚠ " +
+  PRINCIPLE_NO_SUMMING +
+  "。並べて眺めるのはよいのですが、点数を足したり多数決を取ったりはしないでください。\n" +
   "この入口にはカード占い・易占・アストロダイス・ジオマンシー" +
   "（list_decks / draw_cards / cast_hexagram / roll_astro_dice / cast_geomancy）も同居しています" +
   "——公開の入口と同じもので、シャッフルも出目もサーバー側の乱数、読みはあなた自身の知識で行います。" +
   "こちらは乱数だけで完結し、この鍵つきの入口から引いても**結果は一切保存されません**" +
   "（台帳に入るのはチャートだけ）。カード・易・ダイス・ジオマンシーもまた別の体系です" +
-  "——四体系と混ぜて点数を足す根拠もありません。";
+  "（上と同じく、合算の根拠にはなりません）。";
 
 // ---------------------------------------------------------------------------
 // ツール定義
 // ---------------------------------------------------------------------------
 
 /**
- * 占術ごとのファイルが持つツール（定義＋実装）を**歴史順のまま**並べたもの。
- * この並びがそのまま tools/list に出るので、足すときは末尾に足す（既存の順は動かさない）。
+ * 占術ごとのファイルが持つツール（定義＋実装）を**科ごとの並び**にしたもの
+ * （出生図の台帳 → 天体系 → 2 枚以上の図 → 誕生日系。2026-08-25 に歴史順から組み替えた）。
+ * この並びがそのまま tools/list に出るので、足すときは同じ科の並びの末尾に足す。
  */
 const ASTRO_TOOL_LIST: readonly AstroTool[] = [
+  // 出生図の台帳
   saveChartTool,
   listChartsTool,
   getChartTool,
   deleteChartTool,
+  updateDefaultLocationTool,
+  // 天体系
   transitTool,
+  transitEventsTool,
   lunarReturnTool,
   solarReturnTool,
   progressionsTool,
-  updateDefaultLocationTool,
   yearlyOverviewTool,
-  transitEventsTool,
+  // 2 枚以上の図
+  synastryTool,
+  compositeTool,
+  // 誕生日系
   calculateNumerologyTool,
   shukuyoTool,
   shukuyoCompatTool,
   fourPillarsTool,
-  synastryTool,
-  kyuseiTool,
-  compositeTool,
   pillarsRelationsTool,
+  kyuseiTool,
 ];
 
 export const ASTRO_TOOLS = ASTRO_TOOL_LIST.map((tool) => tool.definition);

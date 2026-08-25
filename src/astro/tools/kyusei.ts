@@ -50,6 +50,12 @@ import {
 } from "../calendar";
 import { AstroError, dateFromJulianDay, julianDay, type SwissEph } from "../chart";
 import { engineOf, type AstroContext, type AstroTool } from "../context";
+import {
+  noReadingNote,
+  PRINCIPLE_CONVENTIONS_ARE_NAMED,
+  PRINCIPLE_NO_SUMMING,
+  READ_WITH_YOUR_OWN_KNOWLEDGE,
+} from "../phrases";
 import { crossUt } from "../returns";
 import { argsOf, optionalNumber, optionalString } from "../tool-args";
 
@@ -258,9 +264,7 @@ function kyuseiBoardText(title: string, view: KyuseiBoardView): string {
   ].join("\n");
 }
 
-const KYUSEI_NO_READING_NOTE =
-  "（九星・殺・方位の意味も吉方位もこのサーバーに載っていません。読みはあなた自身の知識で。" +
-  "ホロスコープ・宿曜・四柱・九星はそれぞれ別の体系で、合算する根拠はありません）";
+const KYUSEI_NO_READING_NOTE = noReadingNote("九星・殺・方位の意味と吉方位");
 
 /** 規約の 1 行（テキストの末尾に置く。structuredContent には KYUSEI_CONVENTIONS が丸ごと入る） */
 const KYUSEI_SYSTEM_LINE =
@@ -442,8 +446,7 @@ export const kyuseiTool: AstroTool = {
       "図は南を上・東を左に描く）と、各盤に立つ殺 9 種" +
       "（五黄殺・暗剣殺・歳破／月破／日破・本命殺・本命的殺・月命殺・月命的殺）。" +
       "date は**過去も未来も受ける**。\n" +
-      "**採った規約は名前で固定して返り値にも書く**（流派で割れるところが多いので、" +
-      "読む側が「この鯖はこの流派」と分かるように）——" +
+      PRINCIPLE_CONVENTIONS_ARE_NAMED +
       "年界は立春（節分までは 1 つ前の年の星）/ 月界は節（太陽黄経 30° ごと）/ 日界は 0 時 / " +
       "陽遁・陰遁は**冬至・夏至に最も近い甲子日**で切り替え（前後が同距離なら後の甲子）/ " +
       "**閏遁は置かない**（切り替えの間隔が 240 日になる期間もそのまま続ける）/ " +
@@ -452,9 +455,10 @@ export const kyuseiTool: AstroTool = {
       "⚠ **日盤の切り替えは流派で割れる**ので、暦によっては日の星がこのサーバーと違う日がある。\n" +
       "**このツールは解釈をしない**——吉方位も凶方位も相性も、九星や殺の意味もサーバーに載せていない" +
       "（「五黄殺」「歳破」は計算上の名前で、吉凶の言葉は 1 語も足していない）。" +
-      "読みはあなた自身の知識で。" +
-      "ホロスコープ・宿曜・四柱・九星はそれぞれ別の体系で、**四体系を合算する根拠はない**" +
-      "（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "。" +
+      PRINCIPLE_NO_SUMMING +
+      "——並べて眺めるのはよいが、点数を足したり多数決を取ったりしない。\n" +
       "九星気学も誕生日を使うので公開のカード層には置いていない。この鍵つきの入口だけにある。" +
       "出生データそのものは返事に出さない（星・盤・殺のような派生値だけを返す）。",
     inputSchema: {

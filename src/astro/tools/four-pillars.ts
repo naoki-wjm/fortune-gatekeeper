@@ -49,6 +49,13 @@ import {
   type AstroContext,
   type AstroTool,
 } from "../context";
+import {
+  MISSING_BIRTH_MESSAGE,
+  noReadingNote,
+  PRINCIPLE_CONVENTIONS_ARE_NAMED,
+  PRINCIPLE_NO_SUMMING,
+  READ_WITH_YOUR_OWN_KNOWLEDGE,
+} from "../phrases";
 import { crossUt } from "../returns";
 import { getChart, type StoredChart } from "../store";
 import { argsOf, optionalNumber, optionalString, requireChartIds } from "../tool-args";
@@ -124,9 +131,7 @@ function solarTermSpanAt(swe: SwissEph, birthJd: number, sunLon: number): SolarT
   };
 }
 
-const FOUR_PILLARS_NO_READING_NOTE =
-  "（通変星・十二運・蔵干・空亡・大運の意味はこのサーバーに載っていません。読みはあなた自身の知識で。" +
-  "ホロスコープ・宿曜・四柱は別々の体系で、合算する根拠はありません）";
+const FOUR_PILLARS_NO_READING_NOTE = noReadingNote("通変星・十二運・蔵干・空亡・大運の意味");
 
 /**
  * 四柱推命（命式と、指定日の流年・月運・日運）。
@@ -241,8 +246,7 @@ async function runFourPillars(rawArguments: unknown, context: AstroContext): Pro
 // ---------------------------------------------------------------------------
 
 const PILLARS_RELATIONS_NO_READING_NOTE =
-  "（関係の名前を並べるだけで、点数化も多数決もしていません。相性の良し悪しもこのサーバーに載っていません" +
-  "——読みはあなた自身の知識で。ホロスコープ・宿曜・四柱・九星は別々の体系で、合算する根拠はありません）";
+  "関係の名前を並べるだけで、点数化も多数決もしていません。" + noReadingNote("相性の良し悪し");
 
 /**
  * 四柱の多者盤面（2〜4 人）。
@@ -270,9 +274,7 @@ async function runPillarsRelations(
     if (!chart.birth) {
       // four_pillars と同じ案内（時柱が要るので、座標だけの古い登録では命式が立たない）
       return toolError(
-        `charts[${index}] に指定したチャート ${chartId} には出生データが入っていません` +
-          "（出生データを保存しない時代の登録です）。" +
-          "delete_chart で消して save_chart で登録し直すと使えます。",
+        `charts[${index}] に指定したチャート ${chartId} には` + MISSING_BIRTH_MESSAGE,
       );
     }
     charts.push(chart);
@@ -360,8 +362,7 @@ export const fourPillarsTool: AstroTool = {
       "(3) date（省略すると今）の流年・月運・日運と、命式との天干五合・六合・六沖。" +
       "date に時刻を付ければ時運（時柱）も出し、日付だけなら年・月・日の三柱で見る。" +
       "date は**過去も未来も受ける**。\n" +
-      "**採った規約は名前で固定して返り値にも書く**（流派で割れるところが多いので、" +
-      "読む側が「この鯖はこの流派」と分かるように）——" +
+      PRINCIPLE_CONVENTIONS_ARE_NAMED +
       "日界は 0 時（23 時台生まれのときだけ「日界 23 時」「夜子時」の 2 通りを alternatives に添える）/ " +
       "時刻の補正なし（経度補正も均時差もかけない。時辰の境から 15 分以内のときだけ印を出し、" +
       "境からの分数そのものは出さない）/ " +
@@ -374,9 +375,11 @@ export const fourPillarsTool: AstroTool = {
       "（返す精度は 0.1 年まで＝出生時刻を約 7 時間の粗さでしか含まない）/ " +
       "巡りと命式の関係は天干五合・六合・六沖のみ（三合・刑・害は範囲外）。\n" +
       "**このツールは解釈をしない**——通変星も十二運も蔵干も大運も名前を並べるだけで、" +
-      "格局・用神・強弱・吉凶はサーバーに載せていない。読みはあなた自身の知識で。" +
-      "ホロスコープ・宿曜・四柱はそれぞれ別の体系で、**三体系を合算する根拠はない**" +
-      "（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n" +
+      "格局・用神・強弱・吉凶はサーバーに載せていない。" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "。" +
+      PRINCIPLE_NO_SUMMING +
+      "——並べて眺めるのはよいが、点数を足したり多数決を取ったりしない。\n" +
       "出生データそのものは返事に出さない（命式・蔵干・大運のような派生値だけを返す）。",
     inputSchema: {
       type: "object",
@@ -462,15 +465,17 @@ export const pillarsRelationsTool: AstroTool = {
       "(3) **3 人以上なら**全員の地支を持ち寄って揃う三合局・方合" +
       "（誰のどの柱がどの支を出しているかつき。1 人で 3 支そろえている局は「単独で成立」と別枠）と、" +
       "空亡の有向辺の連鎖（環が閉じていれば「相互」「三すくみ」と名前で）。\n" +
-      "**採った規約は名前で固定して返り値にも書く**——" +
+      PRINCIPLE_CONVENTIONS_ARE_NAMED +
       "日界 0 時（23 時台生まれの「夜子時」は採らず、既定の 1 通りだけで並べる）/ " +
       "空亡は日柱の旬から取り、相手のどの柱の地支も見る / " +
       "半合は三合局の 3 支のうち 2 支（旺支を含まない組も同じ半合として数える）/ " +
       "**刑・害・破は含めない**（拾い忘れではなく採らないという意味で、conventions の excluded に名前を書く）。\n" +
       "**このツールは解釈をしない**——関係の名前を並べるだけで、**点数化も多数決もしない**" +
       "（合の数を数えて相性の点にしたり、凶の札を足し合わせたりはサーバーの持ち場ではない）。" +
-      "読みはあなた自身の知識で。ホロスコープ・宿曜・四柱・九星はそれぞれ別の体系で、" +
-      "**四体系を合算する根拠はない**。\n" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "。" +
+      PRINCIPLE_NO_SUMMING +
+      "。\n" +
       "出生データそのものは返事に出さない（命式＝干支のような派生値だけを返す）。",
     inputSchema: {
       type: "object",

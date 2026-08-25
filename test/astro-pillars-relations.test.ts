@@ -374,7 +374,7 @@ describe("pillars_relations と出生データ", () => {
     expect(structured).not.toContain("start_age");
   });
 
-  it("tools/list に 19 本目として並ぶ（凍結した定義と同じ形）", async () => {
+  it("tools/list に 18 本目として並ぶ（凍結した定義と同じ形）", async () => {
     const response = await handleAstroMcpRequest(
       new Request("http://localhost/astro/mcp", {
         method: "POST",
@@ -385,11 +385,12 @@ describe("pillars_relations と出生データ", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 5 本のスーパーセット。pillars_relations は占星術層の末尾（19 番目）
+    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // pillars_relations は four_pillars の次＝ 18 番目（誕生日系の科の末尾は kyusei）
     expect(tools).toHaveLength(24);
-    expect(tools[18]?.name).toBe("pillars_relations");
+    expect(tools[17]?.name).toBe("pillars_relations");
 
-    const tool: any = tools[18];
+    const tool: any = tools[17];
     expect(tool.title).toBe("四柱の多者盤面（2〜4 人）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["charts"]);
     expect(tool.inputSchema.properties.charts).toMatchObject({
@@ -404,7 +405,9 @@ describe("pillars_relations と出生データ", () => {
     // 点数化しない・刑害破は採らない・合算の根拠はない、を description に書いてある
     expect(tool.description).toContain("点数化も多数決もしない");
     expect(tool.description).toContain("刑・害・破は含めない");
-    expect(tool.description).toContain("四体系を合算する根拠はない");
+    expect(tool.description).toContain(
+      "どれだけ体系を横断し、それらが全て同じ結果を示したとて、合算の根拠にはならない",
+    );
     expect(tool.description).toContain("解釈をしない");
     expect(tool.description).toContain("出生データそのものは返事に出さない");
   });

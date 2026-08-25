@@ -44,6 +44,7 @@ import {
   type AstroContext,
   type AstroTool,
 } from "../context";
+import { missingChartMessage } from "../phrases";
 import {
   BODY_SET_LABEL,
   MAX_DAYS,
@@ -68,10 +69,7 @@ async function runTransit(rawArguments: unknown, context: AstroContext): Promise
 
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-        "save_chart で登録してください。",
-    );
+    return toolError(missingChartMessage(chartId));
   }
 
   const year = optionalInteger(args, "year", -5000, 5000);
@@ -207,10 +205,7 @@ async function runTransitEvents(rawArguments: unknown, context: AstroContext): P
 
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-        "save_chart で登録してください。",
-    );
+    return toolError(missingChartMessage(chartId));
   }
 
   const start = optionalString(args, "start", 12);

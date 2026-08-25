@@ -23,6 +23,7 @@ import {
 } from "../chart";
 import { assertCalendarDay, formatOffsetLabel, pad } from "../calendar";
 import { aspectPointsOf, engineOf, type AstroContext, type AstroTool } from "../context";
+import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../phrases";
 import { computeProgression, formatAge, formatArc } from "../returns";
 import { getChart } from "../store";
 import { argsOf, optionalInteger, optionalNumber, requireString } from "../tool-args";
@@ -44,17 +45,11 @@ async function runProgressions(rawArguments: unknown, context: AstroContext): Pr
 
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-        "save_chart で登録してください。",
-    );
+    return toolError(missingChartMessage(chartId));
   }
   const birth = chart.birth;
   if (!birth) {
-    return toolError(
-      "このチャートには出生データが入っていません（出生データを保存しない時代の登録です）。" +
-        "delete_chart で消して save_chart で登録し直すと使えます。",
-    );
+    return toolError("このチャートには" + MISSING_BIRTH_MESSAGE);
   }
   const natalMoment: MomentInput = {
     year: birth.year,

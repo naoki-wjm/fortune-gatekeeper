@@ -305,7 +305,7 @@ describe("synastry", () => {
     expect(structured).not.toContain("utc_offset");
   });
 
-  it("tools/list に 16 本目として並ぶ（凍結した定義と同じ形）", async () => {
+  it("tools/list に 12 本目として並ぶ（凍結した定義と同じ形）", async () => {
     const response = await handleAstroMcpRequest(
       new Request("http://localhost/astro/mcp", {
         method: "POST",
@@ -316,14 +316,12 @@ describe("synastry", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 2026-08-22 夜に kyusei が 17 本目として後ろに付いたので、synastry は末尾ではなく 16 番目
-    // （2026-08-24 のスーパーセット化でカード層 5 本がさらに後ろに付き、2026-08-25 の
-    //  composite が 18 本目・pillars_relations が 19 本目に入って全 24 本。
-    //  synastry の位置は 16 番目のまま）
+    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // synastry は「2 枚以上の図」の科の頭＝ 12 番目（composite が 13 番目で続く）
     expect(tools).toHaveLength(24);
-    expect(tools[15]?.name).toBe("synastry");
+    expect(tools[11]?.name).toBe("synastry");
 
-    const tool: any = tools[15];
+    const tool: any = tools[11];
     expect(tool.title).toBe("シナストリー（2 枚の出生図の間のアスペクトと在ハウス）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["a", "b", "orb"]);
     expect(tool.inputSchema.required).toEqual(["a", "b"]);

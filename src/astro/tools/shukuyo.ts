@@ -47,6 +47,12 @@ import {
   type SwissEph,
 } from "../chart";
 import { engineOf, type AstroContext, type AstroTool } from "../context";
+import {
+  MISSING_BIRTH_MESSAGE,
+  noReadingNote,
+  PRINCIPLE_NO_SUMMING,
+  READ_WITH_YOUR_OWN_KNOWLEDGE,
+} from "../phrases";
 import { crossUt } from "../returns";
 import { getChart, isChartId } from "../store";
 import { argsOf, optionalNumber, optionalString, requireString } from "../tool-args";
@@ -132,9 +138,7 @@ const SHUKUYO_SYSTEM = {
   note: "『宿曜経』の列挙は昴宿から始まるが、それは表の並びであって位置の起点ではない",
 } as const;
 
-const SHUKUYO_NO_READING_NOTE =
-  "（宿の意味・吉凶はこのサーバーに載っていません。読みはあなた自身の知識で。" +
-  "ホロスコープ・宿曜・四柱は別々の体系で、合算する根拠はありません）";
+const SHUKUYO_NO_READING_NOTE = noReadingNote("宿の意味・吉凶");
 
 /** 規約の 1 行（テキストの末尾に置く） */
 const SHUKUYO_SYSTEM_LINE =
@@ -288,9 +292,9 @@ async function resolveCompatParty(
       if (!chart.birth) {
         return {
           error: toolError(
-            `${key} に指定したチャート ${raw} には出生データが入っていません` +
-              "（出生データを保存しない時代の登録です）。" +
-              "delete_chart で消して save_chart で登録し直すか、宿名を直接指定してください。",
+            `${key} に指定したチャート ${raw} には` +
+              MISSING_BIRTH_MESSAGE +
+              "宿名を直接指定して呼ぶこともできます。",
           ),
         };
       }
@@ -386,8 +390,10 @@ export const shukuyoTool: AstroTool = {
       "(3) その日のうちに宿が切り替わる時刻。date は**過去も未来も受ける**" +
       "（日記の日付を後から引き直すときなど）。\n" +
       "**このツールは解釈をしない**——宿の意味も吉凶もサーバーに載せていないので、" +
-      "読みはあなた自身の知識で。ホロスコープ・宿曜・四柱はそれぞれ別の体系で、" +
-      "**三体系を合算する根拠はない**（並べて眺めるのはよいが、点数を足したり多数決を取ったりしない）。\n" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "。" +
+      PRINCIPLE_NO_SUMMING +
+      "——並べて眺めるのはよいが、点数を足したり多数決を取ったりしない。\n" +
       "出生データそのものは返事に出さない（宿・サイデリアル黄経のような派生値だけを返す）。",
     inputSchema: {
       type: "object",
@@ -465,7 +471,10 @@ export const shukuyoCompatTool: AstroTool = {
       "向きによらない**組の名前**（命・栄親・友衰・安壊・危成・業胎）。" +
       "三九の秘法は向きで名前が変わる（A から見て栄なら B から見ると親）ので両方向を返す。\n" +
       "**このツールは解釈をしない**——関係の意味はサーバーに載せていないので、" +
-      "読みはあなた自身の知識で。ホロスコープ・宿曜・四柱を合算する根拠はない。\n" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "。" +
+      PRINCIPLE_NO_SUMMING +
+      "。\n" +
       "chart_id で呼んだときも出生データは返事に出さない。",
     inputSchema: {
       type: "object",

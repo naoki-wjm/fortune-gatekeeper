@@ -15,6 +15,7 @@ import {
 import { AstroError } from "../chart";
 import { assertCalendarDay } from "../calendar";
 import { type AstroContext, type AstroTool } from "../context";
+import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../phrases";
 import { getChart } from "../store";
 import {
   argsOf,
@@ -91,19 +92,13 @@ async function resolveNumerologyBirth(
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
     return {
-      error: toolError(
-        `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-          "save_chart で登録してください。",
-      ),
+      error: toolError(missingChartMessage(chartId)),
     };
   }
   const birth = chart.birth;
   if (!birth) {
     return {
-      error: toolError(
-        "このチャートには出生データが入っていません（出生データを保存しない時代の登録です）。" +
-          "delete_chart で消して save_chart で登録し直すと使えます。",
-      ),
+      error: toolError("このチャートには" + MISSING_BIRTH_MESSAGE),
     };
   }
   return {

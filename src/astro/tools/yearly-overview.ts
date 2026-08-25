@@ -22,6 +22,7 @@ import {
   pad,
 } from "../calendar";
 import { engineOf, type AstroContext, type AstroTool } from "../context";
+import { missingChartMessage } from "../phrases";
 import { crossUt } from "../returns";
 import { getChart } from "../store";
 import { argsOf, optionalInteger, optionalNumber, requireString } from "../tool-args";
@@ -46,10 +47,7 @@ async function runYearlyOverview(
 
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-        "save_chart で登録してください。",
-    );
+    return toolError(missingChartMessage(chartId));
   }
 
   const sun = chart.planets.find((planet) => planet.id === 0);

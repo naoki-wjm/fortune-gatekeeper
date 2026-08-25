@@ -31,6 +31,7 @@ import {
   type AstroContext,
   type AstroTool,
 } from "../context";
+import { missingChartMessage } from "../phrases";
 import {
   createChart,
   deleteChart,
@@ -199,10 +200,7 @@ async function runGetChart(rawArguments: unknown, context: AstroContext): Promis
 
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-        "save_chart で登録してください。",
-    );
+    return toolError(missingChartMessage(chartId));
   }
 
   const orb = optionalNumber(args, "orb", 0.5, 10) ?? DEFAULT_NATAL_ORB;
@@ -274,9 +272,8 @@ async function runDeleteChart(rawArguments: unknown, context: AstroContext): Pro
   const existing = await getChart(context.kv, context.auth.user, chartId);
   const removed = existing ? await deleteChart(context.kv, context.auth.user, chartId) : false;
   if (!removed || !existing) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめてください。`,
-    );
+    // 消そうとして無かった人に save_chart を勧めるのは筋違いなので、ここだけ短い断りにする
+    return toolError(`チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめてください。`);
   }
 
   // 出生データを預かっていた図だけ、それも消えたと言い添える（無かった図に言うと嘘になる）
@@ -307,10 +304,7 @@ async function runUpdateDefaultLocation(
 
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-        "save_chart で登録してください。",
-    );
+    return toolError(missingChartMessage(chartId));
   }
 
   const clear = optionalBoolean(args, "clear") ?? false;

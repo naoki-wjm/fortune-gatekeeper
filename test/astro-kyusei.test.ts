@@ -552,7 +552,7 @@ describe("kyusei", () => {
     expect(result.content[0].text).not.toContain("24");
   });
 
-  it("tools/list に 17 本目として並ぶ", async () => {
+  it("tools/list に 19 本目として並ぶ", async () => {
     const response = await handleAstroMcpRequest(
       new Request("http://localhost/astro/mcp", {
         method: "POST",
@@ -563,12 +563,12 @@ describe("kyusei", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 2026-08-24 のスーパーセット化でカード層 5 本が、2026-08-25 に composite が 18 本目・
-    // pillars_relations が 19 本目に入ったので全 24 本。kyusei は 17 番目のまま
+    // 占星術層 19 本＋カード層 5 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
+    // kyusei は誕生日系の科の末尾＝占星術層の 19 番目（この後ろはカード層 5 本）
     expect(tools).toHaveLength(24);
-    expect(tools[16]?.name).toBe("kyusei");
+    expect(tools[18]?.name).toBe("kyusei");
 
-    const tool: any = tools[16];
+    const tool: any = tools[18];
     expect(tool.title).toBe("九星気学（本命星・月命星・日命星と年盤・月盤・日盤）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual([
       "chart_id",
@@ -591,7 +591,9 @@ describe("kyusei", () => {
     expect(tool.description).toContain("**閏遁は置かない**");
     expect(tool.description).toContain("日盤の切り替えは流派で割れる");
     expect(tool.description).toContain("**このツールは解釈をしない**");
-    expect(tool.description).toContain("四体系を合算する根拠はない");
+    expect(tool.description).toContain(
+      "どれだけ体系を横断し、それらが全て同じ結果を示したとて、合算の根拠にはならない",
+    );
     expect(tool.description).toContain("出生データそのものは返事に出さない");
   });
 });

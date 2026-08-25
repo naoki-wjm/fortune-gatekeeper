@@ -35,6 +35,7 @@ import {
   monthStartJd,
 } from "../calendar";
 import { aspectPointsOf, engineOf, type AstroContext, type AstroTool } from "../context";
+import { missingChartMessage } from "../phrases";
 import { crossUt, crossingsInRange, type ReturnKind } from "../returns";
 import { getChart, type StoredChart } from "../store";
 import {
@@ -120,10 +121,7 @@ async function runReturn(
 
   const chart = await getChart(context.kv, context.auth.user, chartId);
   if (!chart) {
-    return toolError(
-      `チャート ${chartId} が見つかりませんでした。list_charts で登録済みの ID を確かめるか、` +
-        "save_chart で登録してください。",
-    );
+    return toolError(missingChartMessage(chartId));
   }
 
   const isLunar = kind === "moon";
