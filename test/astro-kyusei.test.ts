@@ -563,12 +563,10 @@ describe("kyusei", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 6 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
-    // kyusei は誕生日系の科の末尾＝占星術層の 19 番目（この後ろはカード層 6 本）
-    expect(tools).toHaveLength(25);
-    expect(tools[18]?.name).toBe("kyusei");
-
-    const tool: any = tools[18];
+    // 並びの検査は入口のテスト（test/astro-mcp.test.ts の tools/list）に任せ、ここは名前で引く
+    // （2026-08-26: 科の途中に 1 本足すたび後ろの科の並び番号が全部ずれて 4 枚割れたので、位置の直書きをやめた）
+    const tool: any = tools.find((candidate) => candidate.name === "kyusei");
+    expect(tool).toBeDefined();
     expect(tool.title).toBe("九星気学（本命星・月命星・日命星と年盤・月盤・日盤）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual([
       "chart_id",

@@ -79,7 +79,7 @@ const VOC_BODY_SET_LABEL: Record<VocBodySet, string> = {
 const MOON_ID = 1;
 
 /** 月の格子の刻み（日）＝6 時間。この刻みが跨ぎ検出と二分法の区間になる */
-const MOON_STEP = 0.25;
+export const MOON_STEP = 0.25;
 
 /** 相手天体の格子の刻み（日）。events.ts が本物の wasm と突き合わせて決めた値と同じ */
 const BODY_STEPS: ReadonlyMap<number, number> = new Map([
@@ -334,12 +334,12 @@ export function formatMoonMoment(jd: number, utcOffset: number): string {
 }
 
 /** 黄経 → 星座の中での度数（0〜30・小数 2 桁） */
-function degreeInSign(lon: number): number {
+export function degreeInSign(lon: number): number {
   const normalized = normalizeDegree(lon);
   return Math.round((normalized - signIndex(normalized) * 30) * 100) / 100;
 }
 
-function signNameOf(index: number): string {
+export function signNameOf(index: number): string {
   return SIGNS[((index % 12) + 12) % 12] as string;
 }
 
@@ -353,7 +353,7 @@ interface Grid {
 }
 
 /** 黄経の列を、前の点との差で連続に均す（events.ts の unwrap と同じ要領。あちらは非公開） */
-function unwrapLongitudes(lon: number[]): void {
+export function unwrapLongitudes(lon: number[]): void {
   let turns = 0;
   let previous = normalizeDegree(lon[0] as number);
   lon[0] = previous;
@@ -437,7 +437,7 @@ function bisectJd(f: (jd: number) => number, lo: number, hi: number): number {
  * 月がらみの角度は月の動き（13°/日）が支配するので単調に増える ―― 跨ぎは 1 区間に高々 1 つ、
  * 向きも一方向だけ。前後に 1 目盛りずつ袖を足して端の跨ぎを取りこぼさないようにしてある。
  */
-function findCrossings(
+export function findCrossings(
   value: (jd: number) => number,
   target: number,
   fromJd: number,

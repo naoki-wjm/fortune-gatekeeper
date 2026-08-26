@@ -211,7 +211,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("25 本のツールを返す（占星術層 19 本＋カード層 6 本のスーパーセット）", async () => {
+  it("26 本のツールを返す（占星術層 20 本＋カード層 6 本のスーパーセット）", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -228,6 +228,7 @@ describe("占星術層の initialize / tools/list", () => {
       "solar_return",
       "progressions",
       "yearly_overview",
+      "natal_moon_calendar",
       // 2 枚以上の図
       "synastry",
       "composite",
@@ -3223,6 +3224,287 @@ describe("transit_events", () => {
   });
 });
 
+describe("natal_moon_calendar", () => {
+  /** 偽エンジンの月に持たせる視速度（度/日）。本物の 13°/日 に近い切りのいい値 */
+  const MOON_SPEED = 13;
+
+  /**
+   * 月だけを「startLon から 13°/日 でまっすぐ走る」ようにする。
+   *
+   * 既定の偽エンジンは天体を止めたまま置き、`swe_mooncross_ut` は**目標黄経を見ずに**周期の
+   * 格子を返す作りなので、そのままではハウス入り（カスプの通過）が月の位置と食い違ってしまう。
+   * ここでは位置と通過の両方を同じ直線に載せて、「カスプを跨ぐ瞬間」「ネイタルへの exact」
+   * 「個人朔望」が互いに辻褄の合う偽の空を作る。
+   */
+  function moveTheMoon(startJd: number, startLon = 100): void {
+    const base = engine.swe_calc_ut;
+    engine.swe_calc_ut = (jd: number, planetId: number, flags: number): number[] =>
+      planetId === 1
+        ? [normalizeDegree(startLon + MOON_SPEED * (jd - startJd)), 0, 1, MOON_SPEED, 0, 0]
+        : base(jd, planetId, flags);
+    engine.swe_mooncross_ut = (targetLon: number, fromJd: number, flags: number): number => {
+      engine.crossCalls.push({ kind: "moon", targetLon, startJd: fromJd, flags });
+      const current = normalizeDegree(startLon + MOON_SPEED * (fromJd - startJd));
+      const ahead = normalizeDegree(targetLon - current);
+      // ちょうど今その黄経に居るなら 1 周先（crossUt は「開始より後」しか受け取らない）
+      return fromJd + (ahead === 0 ? 360 : ahead) / MOON_SPEED;
+    };
+  }
+
+  /** 2026-08-25 00:00（UTC+9）＝この科の標準の期間の頭 */
+  function startOfWindow(): number {
+    return engine.swe_julday(2026, 8, 25, -9, 1);
+  }
+
+  const ARGS = { start: "2026-08-25", days: 14, utc_offset: 9 };
+
+  it("空の暦は公開層の moon_calendar と同じもの（計算を二重化しない）", async () => {
+    const chartId = await saveDefaultChart();
+    moveTheMoon(startOfWindow());
+
+    const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
+    expect(result.isError).toBeUndefined();
+    const structured = result.structuredContent;
+    expect(structured.kind).toBe("natal_moon_calendar");
+    expect(structured.chart_id).toBe(chartId);
+    expect(structured.label).toBe("サンプル");
+    expect(structured.house_system).toBe("P");
+
+    // 同じ入口に同居しているカード層の moon_calendar を同じ引数で引いて突き合わせる
+    const sky = await call("moon_calendar", ARGS);
+    expect(structured.range).toEqual(sky.structuredContent.range);
+    expect(structured.phases).toEqual(sky.structuredContent.phases);
+    expect(structured.ingresses).toEqual(sky.structuredContent.ingresses);
+    expect(structured.void_of_course).toEqual(sky.structuredContent.void_of_course);
+    expect(structured.eclipses).toEqual(sky.structuredContent.eclipses);
+
+    // moon_at_start に足したのは house の 1 つだけ
+    const { house, ...atStart } = structured.moon_at_start;
+    expect(atStart).toEqual(sky.structuredContent.moon_at_start);
+    expect(house).toBe(1);
+
+    // テキストも公開層のものが頭にそのまま乗る
+    const text: string = result.content[0].text;
+    expect(text.startsWith(sky.content[0].text as string)).toBe(true);
+    expect(text).toContain(
+      `■ ネイタルに重ねた月（チャート: サンプル（${chartId}） / ハウス方式: プラシーダス（P））`,
+    );
+    expect(text).toContain("（t.＝空の月 / n.＝ネイタル。開始時点の月は n.1H に居ます）");
+  });
+
+  it("ハウス入りは月がカスプを跨ぐ瞬間（1 つずつ順に進む）", async () => {
+    const chartId = await saveDefaultChart();
+    moveTheMoon(startOfWindow());
+
+    const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
+    const ingresses = result.structuredContent.house_ingresses;
+
+    // 偽のカスプは 90°（1H）から 30° 刻み。月は 100° から 13°/日 で 14 日走って 282° まで
+    expect(ingresses.map((entry: any) => entry.house)).toEqual([2, 3, 4, 5, 6, 7]);
+    expect(ingresses.map((entry: any) => entry.from_house)).toEqual([1, 2, 3, 4, 5, 6]);
+    // 2H 入り＝ 120° を跨ぐ瞬間＝ (120−100)/13 日後
+    expect(ingresses[0].time).toBe("2026-08-26 12:55+09:00");
+    expect(result.content[0].text).toContain(
+      "2026-08-26 12:55+09:00  t.月 → n.2H 入り（1H → 2H）",
+    );
+    expect(result.content[0].text).toContain(
+      "■ 件数 ハウス入り 6 / ネイタルへの exact 48 / 個人朔望 4",
+    );
+  });
+
+  it("ネイタルへの exact は 10 天体＋ASC / MC（ノードは相手に入れない）", async () => {
+    // 火星だけ半端な角度へずらす（度数の欄がちゃんと動くことを見るため）
+    nudgePlanet(4, 7.5);
+    const chartId = await saveDefaultChart();
+    moveTheMoon(startOfWindow());
+
+    const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
+    const aspects = result.structuredContent.natal_aspects;
+
+    // 12 点 × 8 通りの目標のうち、月が 100°→282° で跨ぐのは 1 点あたり 4 つ
+    expect(aspects).toHaveLength(48);
+    expect(aspects.every((entry: any) => entry.target !== "Nノード")).toBe(true);
+    expect(aspects.some((entry: any) => entry.target === "ASC")).toBe(true);
+    expect(aspects.some((entry: any) => entry.target === "MC")).toBe(true);
+    // 時系列（同じ瞬間に何本も立つので「後戻りしない」で見る）
+    const times = aspects.map((entry: any) => entry.time);
+    expect([...times].sort()).toEqual(times);
+
+    // ネイタル太陽（0°）へのオポジション＝月が 180° に来る瞬間＝ (180−100)/13 日後
+    expect(aspects).toContainEqual({
+      time: "2026-08-31 03:42+09:00",
+      target: "太陽",
+      aspect: "オポジション",
+      angle: 180,
+      moon_sign: "天秤座",
+      moon_degree: 0,
+    });
+    // ずらした火星（127.5°）への合は度数も半端になる
+    expect(aspects).toContainEqual({
+      time: "2026-08-27 02:46+09:00",
+      target: "火星",
+      aspect: "コンジャンクション",
+      angle: 0,
+      moon_sign: "獅子座",
+      moon_degree: 7.5,
+    });
+    expect(result.content[0].text).toContain(
+      "2026-08-31 03:42+09:00  t.月 ☍ n.太陽  exact（天秤座 0.00°）",
+    );
+  });
+
+  it("個人朔望はネイタル太陽とネイタル月に対する 0 / 90 / 180 / 270°", async () => {
+    const chartId = await saveDefaultChart();
+    moveTheMoon(startOfWindow());
+
+    const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
+    // 偽のネイタルは太陽 0°・月 30°。月の通り道（100°→282°）に入るのは 4 つ
+    expect(result.structuredContent.personal_phases).toEqual([
+      {
+        kind: "first_quarter_equivalent",
+        relative_to: "natal_moon",
+        time: "2026-08-26 12:55+09:00",
+        moon_sign: "獅子座",
+        moon_degree: 0,
+      },
+      {
+        kind: "full_moon_equivalent",
+        relative_to: "natal_sun",
+        time: "2026-08-31 03:42+09:00",
+        moon_sign: "天秤座",
+        moon_degree: 0,
+      },
+      {
+        kind: "full_moon_equivalent",
+        relative_to: "natal_moon",
+        time: "2026-09-02 11:05+09:00",
+        moon_sign: "蠍座",
+        moon_degree: 0,
+      },
+      {
+        kind: "last_quarter_equivalent",
+        relative_to: "natal_sun",
+        time: "2026-09-07 01:51+09:00",
+        moon_sign: "山羊座",
+        moon_degree: 0,
+      },
+    ]);
+    expect(result.content[0].text).toContain(
+      "2026-08-31 03:42+09:00  ［ネイタル太陽の満月相当］t.月 − n.太陽 180°（天秤座 0.00°）",
+    );
+  });
+
+  it("ネイタル月との 0° はルナリターンと同じ瞬間（テキストにもそう書く）", async () => {
+    const chartId = await saveDefaultChart();
+    moveTheMoon(startOfWindow());
+
+    // 月が 1 周するまで見る（100° から 30° へ戻るのは 290/13 日後）
+    const result = await call("natal_moon_calendar", {
+      chart_id: chartId,
+      start: "2026-08-25",
+      days: 28,
+      utc_offset: 9,
+    });
+    const returns = result.structuredContent.personal_phases.filter(
+      (entry: any) => entry.kind === "new_moon_equivalent" && entry.relative_to === "natal_moon",
+    );
+    expect(returns).toEqual([
+      {
+        kind: "new_moon_equivalent",
+        relative_to: "natal_moon",
+        time: "2026-09-16 07:23+09:00",
+        moon_sign: "牡牛座",
+        moon_degree: 0,
+      },
+    ]);
+    expect(result.content[0].text).toContain(
+      "2026-09-16 07:23+09:00  ［ネイタル月の新月相当＝ルナリターン］t.月 − n.月 0°（牡牛座 0.00°）",
+    );
+  });
+
+  it("規約は名前で返す（空の暦の 7 項＋この科の 4 項）", async () => {
+    const chartId = await saveDefaultChart();
+    moveTheMoon(startOfWindow());
+
+    const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
+    expect(result.structuredContent.conventions).toEqual({
+      void_of_course: "last_exact_major_aspect_to_next_ingress",
+      voc_bodies: "modern",
+      aspects: [0, 60, 90, 120, 180],
+      orb: 0,
+      eclipses: "global",
+      zodiac: "tropical",
+      ephemeris: "moshier",
+      houses: "P",
+      natal_aspects: "exact_only_no_orb",
+      natal_targets: "10_planets_asc_mc_no_nodes",
+      personal_phases: "moon_to_natal_sun_and_moon",
+    });
+    expect(result.content[0].text).toContain(
+      "（ハウス入り・アスペクト・個人朔望の意味はこのサーバーに載っていません。",
+    );
+  });
+
+  it("出生データは返事に出さない（時刻・ハウス・度数だけ）", async () => {
+    const chartId = await saveDefaultChart();
+    moveTheMoon(startOfWindow());
+
+    const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
+    const text: string = result.content[0].text;
+    const json = JSON.stringify(result.structuredContent);
+    for (const secret of ["1990", "35.6895", "139.6917"]) {
+      expect(text).not.toContain(secret);
+      expect(json).not.toContain(secret);
+    }
+  });
+
+  it("出生データを預かっていない古い登録でも引ける（座標だけで立つ暦）", async () => {
+    const chartId = putLegacyChart();
+    moveTheMoon(startOfWindow());
+
+    const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
+    expect(result.isError).toBeUndefined();
+    // 古い登録に入っているのは太陽だけ＝相手は 太陽・ASC・MC の 3 点、個人朔望も太陽ぶんだけ
+    const targets = new Set(
+      result.structuredContent.natal_aspects.map((entry: any) => entry.target),
+    );
+    expect([...targets].sort()).toEqual(["ASC", "MC", "太陽"]);
+    expect(
+      result.structuredContent.personal_phases.every(
+        (entry: any) => entry.relative_to === "natal_sun",
+      ),
+    ).toBe(true);
+  });
+
+  it("知らない chart_id と引数の間違いは isError（天体計算より先に断る）", async () => {
+    const chartId = await saveDefaultChart();
+
+    const unknown = await call("natal_moon_calendar", { chart_id: "zzzz9999" });
+    expect(unknown.isError).toBe(true);
+    expect(unknown.content[0].text).toContain("見つかりませんでした");
+
+    const tooLong = await call("natal_moon_calendar", { chart_id: chartId, days: 63 });
+    expect(tooLong.isError).toBe(true);
+    expect(tooLong.content[0].text).toContain("days は 1 以上 62 以下");
+
+    const slashes = await call("natal_moon_calendar", { chart_id: chartId, start: "2026/08/25" });
+    expect(slashes.isError).toBe(true);
+    expect(slashes.content[0].text).toContain("YYYY-MM-DD");
+
+    const badVoc = await call("natal_moon_calendar", { chart_id: chartId, voc_bodies: "vedic" });
+    expect(badVoc.isError).toBe(true);
+    expect(badVoc.content[0].text).toContain("modern / traditional");
+
+    const noChart = await call("natal_moon_calendar", { days: 7 });
+    expect(noChart.isError).toBe(true);
+    expect(noChart.content[0].text).toContain("chart_id は必須です");
+
+    const typo = await call("natal_moon_calendar", { chart_id: chartId, day: 7 });
+    expect(typo.isError).toBe(true);
+    expect(typo.content[0].text).toContain("未知の引数");
+  });
+});
+
 describe("知らないツール", () => {
   it("isError で返す", async () => {
     const result = await call("reverse_horoscope", {});
@@ -3481,6 +3763,9 @@ describe("chart_id の衝突回避", () => {
  *   description を更新＝合算の話の 6 本（shukuyo / shukuyo_compat / four_pillars / kyusei /
  *   pillars_relations）と、規約の頭の言い回し（pillars_relations / composite）。
  *   「三体系」「四体系」の語はここから消えた（体系は増えるので数を書かない）
+ * - 2026-08-26 ネイタルに重ねた月の暦 natal_moon_calendar（20 本目）を**天体系の科の末尾**＝
+ *   yearly_overview の次に挿入して更新（既存 19 本は 1 文字も動かしていない。
+ *   末尾ではなく途中に入るので、synastry から後ろは並びが 1 つずつ下がる）
  */
 const FROZEN_ASTRO_TOOLS = [
   {
@@ -3987,6 +4272,55 @@ const FROZEN_ASTRO_TOOLS = [
           "minimum": -14,
           "maximum": 14,
           "description": "日付に使う時差（時間単位。日本時間なら 9。省略すると UTC の暦）"
+        }
+      },
+      "required": [
+        "chart_id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "natal_moon_calendar",
+    "title": "ネイタルに重ねた月の暦",
+    "description": "**登録済みチャートの上を月がどう通るか**を期間でまとめて返す。公開の moon_calendar（空の月の暦＝新月・上弦・満月・下弦、月の星座入り、ボイドタイム、食）をそのまま含み、そこに個人の層を 3 つ重ねる。\n重ねるのは (1) **ハウス入り**＝月がネイタルのカスプを跨ぐ瞬間（期間の頭でどのハウスに居るかも）、(2) **ネイタルへの exact**＝月とネイタルの 10 天体（ノードは除く）・ASC / MC がメジャー5種（合・セクスタイル・スクエア・トライン・オポジション）を作る**ぴったりの瞬間**、(3) **個人朔望**＝ネイタルの太陽・月から見た月の 0 / 90 / 180 / 270°（new_moon_equivalent / first_quarter_equivalent / full_moon_equivalent / last_quarter_equivalent。ネイタル月との 0° はルナリターンと同じ瞬間）。\n**採った規約は名前で固定して返り値にも書く**（流派で割れるところが多いので、読む側が「この鯖はこの流派」と分かるように）——ハウスは登録時のハウス方式のカスプ / ネイタルへのアスペクトは**オーブを取らず exact だけ**（暦なので「いつぴったりか」だけを返す。窓の始まりと終わりが要るなら transit_events のほう） / 個人朔望はネイタル太陽とネイタル月の 2 つに対してだけ / ボイドの規約と食の扱いは moon_calendar と同じ（返り値の conventions に名前で入る）。\n⚠ ボイドの定義は流派で割れる（相手天体の範囲・オーブの有無・「その星座を出るまで」か「次のアスペクトまで」か）。このサーバーは 1 通りだけを採る。\n空だけを見たいとき（誕生日を使わないとき）は moon_calendar、今この瞬間の配置は transit、期間内の窓（entering・exact・leaving）は transit_events。\nこのツールは解釈をしない——月がそのハウスに入ることの意味も、個人朔望の読み方もサーバーに載せていないので、読みはあなた自身の知識で。\n出生データそのものは返事に出さない（時刻・ハウス番号・星座と度数という派生値だけを返す）。\n⚠ どれだけ体系を横断し、それらが全て同じ結果を示したとて、合算の根拠にはならない（面白がるのは自由）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chart_id": {
+          "type": "string",
+          "description": "対象のチャート ID（list_charts で確認できる）"
+        },
+        "start": {
+          "type": "string",
+          "description": "期間の頭を \"YYYY-MM-DD\" で（例: 2026-08-25）。その日の 0 時から数える。省略すると utc_offset の暦での今日。"
+        },
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 62,
+          "default": 14,
+          "description": "何日ぶん見るか（既定 14・最大 62 ＝ 2 朔望月ぶん）。"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "default": 9,
+          "description": "どの土地の時計で読むか（既定 9＝日本時間）。返す時刻はすべてこの時差の現地時刻で、+09:00 のような札が付く。"
+        },
+        "voc_bodies": {
+          "type": "string",
+          "enum": [
+            "modern",
+            "traditional"
+          ],
+          "default": "modern",
+          "description": "ボイド判定の相手天体（既定 modern）。modern＝太陽・水星〜冥王星の 9 天体 / traditional＝太陽・水星〜土星の 7 天体（近代以降に見つかった 3 つを外す流派）。"
         }
       },
       "required": [

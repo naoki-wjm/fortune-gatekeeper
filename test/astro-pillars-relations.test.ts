@@ -385,12 +385,10 @@ describe("pillars_relations と出生データ", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 6 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
-    // pillars_relations は four_pillars の次＝ 18 番目（誕生日系の科の末尾は kyusei）
-    expect(tools).toHaveLength(25);
-    expect(tools[17]?.name).toBe("pillars_relations");
-
-    const tool: any = tools[17];
+    // 並びの検査は入口のテスト（test/astro-mcp.test.ts の tools/list）に任せ、ここは名前で引く
+    // （2026-08-26: 科の途中に 1 本足すたび後ろの科の並び番号が全部ずれて 4 枚割れたので、位置の直書きをやめた）
+    const tool: any = tools.find((candidate) => candidate.name === "pillars_relations");
+    expect(tool).toBeDefined();
     expect(tool.title).toBe("四柱の多者盤面（2〜4 人）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["charts"]);
     expect(tool.inputSchema.properties.charts).toMatchObject({

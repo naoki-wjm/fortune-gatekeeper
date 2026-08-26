@@ -504,12 +504,10 @@ describe("composite と出生データ", () => {
     );
     const json = JSON.parse(await response.text());
     const tools: { name: string }[] = json.result.tools;
-    // 占星術層 19 本＋カード層 6 本のスーパーセット。2026-08-25 に並びを科ごとへ組み替えたので、
-    // composite は「2 枚以上の図」の科の 2 本目＝ 13 番目（synastry の次）
-    expect(tools).toHaveLength(25);
-    expect(tools[12]?.name).toBe("composite");
-
-    const tool: any = tools[12];
+    // 並びの検査は入口のテスト（test/astro-mcp.test.ts の tools/list）に任せ、ここは名前で引く
+    // （2026-08-26: 科の途中に 1 本足すたび後ろの科の並び番号が全部ずれて 4 枚割れたので、位置の直書きをやめた）
+    const tool: any = tools.find((candidate) => candidate.name === "composite");
+    expect(tool).toBeDefined();
     expect(tool.title).toBe("コンポジット（2 枚の中点図）");
     expect(Object.keys(tool.inputSchema.properties)).toEqual(["a", "b", "c", "orb"]);
     expect(tool.inputSchema.required).toEqual(["a", "b"]);

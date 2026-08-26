@@ -39,6 +39,7 @@ import {
 import { fourPillarsTool, pillarsRelationsTool } from "./tools/four-pillars";
 import { kyuseiTool } from "./tools/kyusei";
 import { lunarReturnTool, solarReturnTool } from "./tools/lunar-solar-return";
+import { natalMoonCalendarTool } from "./tools/natal-moon-calendar";
 import { calculateNumerologyTool } from "./tools/numerology";
 import { progressionsTool } from "./tools/progressions";
 import { shukuyoCompatTool, shukuyoTool } from "./tools/shukuyo";
@@ -85,6 +86,9 @@ const ASTRO_INSTRUCTIONS =
   "transit_events=期間内（既定は今日から 7 日）のアスペクトの entering・exact・leaving、留、" +
   "イングレスを分単位の時刻つきで時系列に" +
   "（「今週 exact になるのは」「明日いちばんタイトな時間帯は」はこれ）/ " +
+  "natal_moon_calendar=空の月の暦（moon_calendar と同じ朔望・星座入り・ボイド・食）に、" +
+  "登録済みチャートのハウス入り・ネイタル天体への exact・ネイタル太陽／月に対する個人朔望を" +
+  "重ねた 1 枚（「この 2 週間、月が自分の図のどこを通るか」はこれ） / " +
   "calculate_numerology=数秘術" +
   "（ライフパス 4 経路・バースデー・アティチュード・パーソナルイヤー／マンス／デイ）。" +
   "chart_id か生年月日の直接指定（year / month / day）のどちらかで呼べます" +
@@ -148,6 +152,7 @@ const ASTRO_TOOL_LIST: readonly AstroTool[] = [
   solarReturnTool,
   progressionsTool,
   yearlyOverviewTool,
+  natalMoonCalendarTool,
   // 2 枚以上の図
   synastryTool,
   compositeTool,
@@ -171,7 +176,7 @@ const ASTRO_TOOL_RUNNERS: ReadonlyMap<string, AstroTool["run"]> = new Map(
 const ASTRO_ARGUMENT_KEYS = allowedArgumentKeys(ASTRO_TOOLS);
 
 /**
- * この入口（/astro/mcp）が公開するツールの明示リスト（allowlist）＝占星術層 19 本＋カード層 5 本の
+ * この入口（/astro/mcp）が公開するツールの明示リスト（allowlist）＝占星術層の全部＋カード層の全部の
  * スーパーセット（2026-08-24。無料プランのコネクタ 1 枠でも全部に届くように）。
  * 除外リストではなく「載せるものを列挙して合成する」方式 ―― カード層に共通ツールが増えれば
  * CARD_TOOLS 経由で自動的にここにも載る。逆方向（公開層に個人データの口が混ざる事故）は、
