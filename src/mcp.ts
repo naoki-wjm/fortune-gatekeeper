@@ -32,6 +32,18 @@ import {
   moonCalendar,
   parseMoonCalendarArguments,
 } from "./moon-calendar";
+import {
+  MAX_CANDIDATES,
+  REVERSE_BODY_KEYS,
+  REVERSE_DEFAULT_UTC_OFFSET,
+  REVERSE_MAX_SPAN_YEARS,
+  REVERSE_MAX_YEAR,
+  REVERSE_MIN_YEAR,
+  REVERSE_PRIORITIES,
+  REVERSE_SIGN_NAMES,
+  parseReverseHoroscopeArguments,
+  reverseHoroscope,
+} from "./reverse-horoscope";
 import { PRINCIPLE_NO_SUMMING, READ_WITH_YOUR_OWN_KNOWLEDGE } from "./phrases";
 import {
   DEFAULT_UTC_OFFSET,
@@ -42,7 +54,7 @@ import {
   sunLongitude,
   type NakkoMoment,
 } from "./nakko";
-import type { SwissEph } from "./astro/chart";
+import { AstroError, type SwissEph } from "./astro/chart";
 import { EngineInitError, internalFailureMessage } from "./internal-error";
 
 /** serverInfo.name。占星術層（astro-mcp.ts）も同じ名前を名乗る */
@@ -71,7 +83,10 @@ const SERVER_INSTRUCTIONS =
   "ジオマンシー（cast_geomancy）も立てられます——16 図形の名前と点の並びだけを返すので、" +
   "意味はあなたの知識で。" +
   "月まわりの暦（moon_calendar）も引けます——朔望・月の星座入り・ボイドタイム・食の時刻だけを" +
-  "期間でまとめて返すので、意味はあなたの知識で。";
+  "期間でまとめて返すので、意味はあなたの知識で。" +
+  "逆引きホロスコープ（reverse_horoscope）もあります——" +
+  "「太陽が牡羊座で月が蟹座」のような配置のほうを先に決めて、" +
+  "その配置になる日を年代範囲から逆に引きます（返すのは日付と時刻の範囲と星座の名前だけ）。";
 
 /** 相手が名乗ってきたバージョンがこの中にあればそれに合わせる */
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -451,6 +466,99 @@ export const TOOLS = [
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
+  {
+    name: "reverse_horoscope",
+    title: "逆引きホロスコープ（その配置になる日を探す）",
+    description:
+      "**配置のほうを先に決めて、その配置になる日を年代範囲から逆に引く**。" +
+      "「太陽が牡羊座で月が蟹座なのはいつか」「金星が獅子座で火星が牡羊座の年はいつか」のような探し方をする（逆行の有無は条件にできない＝返り値に印が付くだけ）。" +
+      "乱数は使わない天体計算で、誕生日も場所も受け取らない（誰が呼んでも同じ答えになる）。\n" +
+      "計算するのはサーバー、" +
+      READ_WITH_YOUR_OWN_KNOWLEDGE +
+      "——返すのは日付・時刻の範囲・星座の名前だけで、" +
+      "「その配置の人は」「その日は何をするとよいか」のたぐいは 1 文字も載せない。\n" +
+      "conditions は { body, sign, priority } の配列。priority=required（既定）**だけで候補日が決まり**、" +
+      "priority=optional は各候補日に「その日そろっているか」を添えるだけ（成り立つ数の多い順→日付順に並ぶ）。" +
+      "required は少なくとも 1 本要る。同じ天体を 2 回は指定できない。太陽は必須ではないので、" +
+      "月だけ・外惑星だけの条件でも引ける。\n" +
+      "sign は日本語（牡羊座〜魚座）でも英語の小文字（aries〜pisces）でもよい。\n" +
+      "採った規約（返り値の conventions にも名前で入る）: 黄道はトロピカル・天体計算は Moshier・" +
+      "星座の境は黄経 30° 刻み・**候補日＝その暦日のどこかの瞬間で required が全部そろう日**" +
+      "（日の途中で始まる／終わる日には、その日の中の時刻の範囲が分単位で付く）。\n" +
+      `候補は多いときで ${MAX_CANDIDATES} 日まで返す（超えたら truncated: true と総数が付く）。` +
+      "各候補日には**その日の現地正午の 10 天体の星座**も添える（条件に無い天体も見えるように）" +
+      "——ただし月のように 1 日で星座が変わる天体では、正午の星座と条件が食い違うことがある" +
+      "（条件が成り立つ時刻は time_ranges のほう）。度数は返さない。\n" +
+      "年代の範囲は year_from・year_to で（両端を含む）。" +
+      `一度に見られるのは ${REVERSE_MAX_SPAN_YEARS} 年ぶんまでで、` +
+      `${REVERSE_MIN_YEAR}〜${REVERSE_MAX_YEAR} 年の内側。\n` +
+      "⚠ " +
+      PRINCIPLE_NO_SUMMING +
+      "。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        conditions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 10,
+          description:
+            "探したい配置。天体ごとに 1 本ずつ（同じ天体を 2 回は書けない）。" +
+            "required が 1 本も無いと断る。",
+          items: {
+            type: "object",
+            properties: {
+              body: {
+                type: "string",
+                enum: REVERSE_BODY_KEYS,
+                description: "天体。ノードやアングル（ASC / MC）は条件に使えない。",
+              },
+              sign: {
+                type: "string",
+                enum: REVERSE_SIGN_NAMES,
+                description: "星座。日本語（牡羊座〜魚座）でも英語の小文字（aries〜pisces）でもよい。",
+              },
+              priority: {
+                type: "string",
+                enum: REVERSE_PRIORITIES,
+                default: "required",
+                description:
+                  "required=候補日を決める条件（既定） / optional=候補日は決めず、" +
+                  "そろっているかどうかだけを各候補日に添える。",
+              },
+            },
+            required: ["body", "sign"],
+            additionalProperties: false,
+          },
+        },
+        year_from: {
+          type: "integer",
+          minimum: REVERSE_MIN_YEAR,
+          maximum: REVERSE_MAX_YEAR,
+          description: `探す年代の始まり（西暦・この年を含む）。${REVERSE_MIN_YEAR} 以上。`,
+        },
+        year_to: {
+          type: "integer",
+          minimum: REVERSE_MIN_YEAR,
+          maximum: REVERSE_MAX_YEAR,
+          description:
+            `探す年代の終わり（西暦・この年を含む）。year_from との差は ${REVERSE_MAX_SPAN_YEARS} 年ぶんまで。`,
+        },
+        utc_offset: {
+          type: "number",
+          minimum: -14,
+          maximum: 14,
+          default: REVERSE_DEFAULT_UTC_OFFSET,
+          description:
+            `どの土地の時計・暦で読むか（既定 ${REVERSE_DEFAULT_UTC_OFFSET}＝日本時間）。` +
+            "候補日はこの時差の暦日で、時刻の範囲もこの現地時刻（+09:00 のような札が付く）。",
+        },
+      },
+      required: ["conditions", "year_from", "year_to"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -774,6 +882,21 @@ async function runMoonCalendar(rawArguments: unknown, context: CardContext): Pro
   return { content: [{ type: "text", text }], structuredContent: result };
 }
 
+/**
+ * 逆引きホロスコープ。moon_calendar と同じ側 ―― 乱数を 1 ビットも使わず、誕生日も場所も受けない
+ * （誰が呼んでも同じ答え＝公開層に置いてよい、という線引きの側）。
+ */
+async function runReverseHoroscope(
+  rawArguments: unknown,
+  context: CardContext,
+): Promise<ToolResult> {
+  // 引数の検算はエンジンより先（断るだけなら wasm に触らずに済む）
+  const request = parseReverseHoroscopeArguments(rawArguments);
+  const swe = await engineOf(context, "逆引きホロスコープを出せません");
+  const { result, text } = reverseHoroscope(swe, request);
+  return { content: [{ type: "text", text }], structuredContent: result };
+}
+
 /** カード層のツールごとの許可キー（ツール定義から自動で導く） */
 const CARD_ARGUMENT_KEYS = allowedArgumentKeys(TOOLS);
 
@@ -804,13 +927,17 @@ export async function callTool(
     if (name === "roll_astro_dice") return runRollAstroDice(rawArguments);
     if (name === "cast_geomancy") return runCastGeomancy();
     if (name === "moon_calendar") return await runMoonCalendar(rawArguments, context);
+    if (name === "reverse_horoscope") return await runReverseHoroscope(rawArguments, context);
     return toolError(`知らないツールです: ${String(name)}`);
   } catch (error) {
     if (
       error instanceof DrawError ||
       error instanceof CastError ||
       error instanceof DiceError ||
-      error instanceof ArgumentError
+      error instanceof ArgumentError ||
+      // 天体計算まわりの言い分（moon_calendar・reverse_horoscope の引数の検算）も
+      // 「渡された引数が変だった」なのでそのまま返す ―― 占星術層の catch と同じ扱い
+      error instanceof AstroError
     ) {
       // 既知の入力エラーは「渡された引数が変だった」という言い分なのでそのまま返す
       return toolError(error.message);

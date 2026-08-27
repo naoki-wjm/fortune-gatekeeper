@@ -45,10 +45,12 @@ export interface Env {
 type MaybeEnv = Env | undefined;
 
 const GUIDE_TEXT = [
-  "fortune-gatekeeper — 占いMCPサーバー（カード占い・易占・アストロダイス・ジオマンシー・月まわりの暦）",
+  "fortune-gatekeeper — 占いMCPサーバー（カード占い・易占・アストロダイス・ジオマンシー・" +
+    "月まわりの暦・逆引きホロスコープ）",
   "",
   "MCP エンドポイント: POST /mcp（JSON-RPC 2.0 / Streamable HTTP・ステートレス）",
-  "ツール: list_decks, draw_cards, cast_hexagram, roll_astro_dice, cast_geomancy, moon_calendar",
+  "ツール: list_decks, draw_cards, cast_hexagram, roll_astro_dice, cast_geomancy, moon_calendar, " +
+    "reverse_horoscope",
   "デッキ: sky（空オラクル） / enigma（エニグマオラクル） / tarot（タロット大アルカナ22枚） / " +
     "tarot_full（タロット78枚） / rune（ルーン） / lenormand（ルノルマン36枚）",
   "易の立て方: coins（擲銭法） / yarrow（本筮法） / abridged（略筮法）",
@@ -56,6 +58,8 @@ const GUIDE_TEXT = [
   "アストロダイス: 天体・星座・ハウスの12面ダイス3個（1〜3組・名前と記号のみ）",
   "ジオマンシー: シールドチャート（母4・娘4・姪4・証人2・裁判官1＋参考の和解者。16図形の名前と点の並びのみ）",
   "月まわりの暦: 朔望・月の星座入り・ボイドタイム・食を期間でまとめて（乱数なしの天体計算。誕生日も場所も受け取らない）",
+  "逆引きホロスコープ: 「太陽が牡羊座で月が蟹座」のような配置から、その配置になる日を年代範囲で逆に引く" +
+    "（こちらも乱数なし・誕生日も場所も受け取らない）",
   "",
   "引くのはサーバー、読むのは呼び出した側。ここに解釈層はありません。",
   "",

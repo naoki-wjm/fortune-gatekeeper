@@ -256,7 +256,7 @@ const SCENARIOS: Scenario[] = [
 /**
  * ツール名 → 引数の表。tools/list に載っている名前がここに無ければ落ちる（新ツールの見張り）。
  * chart_id 系は A の 1 枚、2 枚以上を見る科は A・B（四柱の多者盤面だけ C も）。
- * カード層の 6 本は最小の引数で（cast_hexagram だけ nakko: true＝エンジンを通る道を選ぶ）。
+ * カード層の 7 本は最小の引数で（cast_hexagram だけ nakko: true＝エンジンを通る道を選ぶ）。
  */
 const TOOL_ARGUMENTS: Record<string, unknown> = {
   // 出生図の台帳
@@ -300,6 +300,11 @@ const TOOL_ARGUMENTS: Record<string, unknown> = {
   roll_astro_dice: {},
   cast_geomancy: {},
   moon_calendar: { days: 3 },
+  reverse_horoscope: {
+    conditions: [{ body: "sun", sign: "aries" }],
+    year_from: 2000,
+    year_to: 2000,
+  },
 };
 
 const ENTRANCE_TOOL_NAMES = [...ASTRO_TOOLS, ...CARD_TOOLS].map((tool) => tool.name);

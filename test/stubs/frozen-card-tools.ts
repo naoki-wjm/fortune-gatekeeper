@@ -30,6 +30,8 @@
  *   2026-08-25 moon_calendar（月まわりの暦）を 6 本目として追加。乱数も個人データも無いので
  *              公開層に置いた＝カード層の凍結もここで面倒を見る。
  *              既存 5 本の定義は 1 文字も変えていない
+ *   2026-08-27 reverse_horoscope（逆引きホロスコープ）を 7 本目として追加。こちらも乱数なし・
+ *              個人データなしなので公開層。既存 6 本の定義は 1 文字も変えていない
  */
 export const FROZEN_CARD_TOOLS = [
   {
@@ -242,6 +244,116 @@ export const FROZEN_CARD_TOOLS = [
           "description": "ボイド判定の相手天体（既定 modern）。modern＝太陽・水星〜冥王星の 9 天体 / traditional＝太陽・水星〜土星の 7 天体（近代以降に見つかった 3 つを外す流派）。"
         }
       },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "reverse_horoscope",
+    "title": "逆引きホロスコープ（その配置になる日を探す）",
+    "description": "**配置のほうを先に決めて、その配置になる日を年代範囲から逆に引く**。「太陽が牡羊座で月が蟹座なのはいつか」「金星が獅子座で火星が牡羊座の年はいつか」のような探し方をする（逆行の有無は条件にできない＝返り値に印が付くだけ）。乱数は使わない天体計算で、誕生日も場所も受け取らない（誰が呼んでも同じ答えになる）。\n計算するのはサーバー、読みはあなた自身の知識で——返すのは日付・時刻の範囲・星座の名前だけで、「その配置の人は」「その日は何をするとよいか」のたぐいは 1 文字も載せない。\nconditions は { body, sign, priority } の配列。priority=required（既定）**だけで候補日が決まり**、priority=optional は各候補日に「その日そろっているか」を添えるだけ（成り立つ数の多い順→日付順に並ぶ）。required は少なくとも 1 本要る。同じ天体を 2 回は指定できない。太陽は必須ではないので、月だけ・外惑星だけの条件でも引ける。\nsign は日本語（牡羊座〜魚座）でも英語の小文字（aries〜pisces）でもよい。\n採った規約（返り値の conventions にも名前で入る）: 黄道はトロピカル・天体計算は Moshier・星座の境は黄経 30° 刻み・**候補日＝その暦日のどこかの瞬間で required が全部そろう日**（日の途中で始まる／終わる日には、その日の中の時刻の範囲が分単位で付く）。\n候補は多いときで 60 日まで返す（超えたら truncated: true と総数が付く）。各候補日には**その日の現地正午の 10 天体の星座**も添える（条件に無い天体も見えるように）——ただし月のように 1 日で星座が変わる天体では、正午の星座と条件が食い違うことがある（条件が成り立つ時刻は time_ranges のほう）。度数は返さない。\n年代の範囲は year_from・year_to で（両端を含む）。一度に見られるのは 30 年ぶんまでで、1800〜2200 年の内側。\n⚠ どれだけ体系を横断し、それらが全て同じ結果を示したとて、合算の根拠にはならない（面白がるのは自由）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "conditions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "description": "探したい配置。天体ごとに 1 本ずつ（同じ天体を 2 回は書けない）。required が 1 本も無いと断る。",
+          "items": {
+            "type": "object",
+            "properties": {
+              "body": {
+                "type": "string",
+                "enum": [
+                  "sun",
+                  "moon",
+                  "mercury",
+                  "venus",
+                  "mars",
+                  "jupiter",
+                  "saturn",
+                  "uranus",
+                  "neptune",
+                  "pluto"
+                ],
+                "description": "天体。ノードやアングル（ASC / MC）は条件に使えない。"
+              },
+              "sign": {
+                "type": "string",
+                "enum": [
+                  "牡羊座",
+                  "牡牛座",
+                  "双子座",
+                  "蟹座",
+                  "獅子座",
+                  "乙女座",
+                  "天秤座",
+                  "蠍座",
+                  "射手座",
+                  "山羊座",
+                  "水瓶座",
+                  "魚座",
+                  "aries",
+                  "taurus",
+                  "gemini",
+                  "cancer",
+                  "leo",
+                  "virgo",
+                  "libra",
+                  "scorpio",
+                  "sagittarius",
+                  "capricorn",
+                  "aquarius",
+                  "pisces"
+                ],
+                "description": "星座。日本語（牡羊座〜魚座）でも英語の小文字（aries〜pisces）でもよい。"
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "required",
+                  "optional"
+                ],
+                "default": "required",
+                "description": "required=候補日を決める条件（既定） / optional=候補日は決めず、そろっているかどうかだけを各候補日に添える。"
+              }
+            },
+            "required": [
+              "body",
+              "sign"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "year_from": {
+          "type": "integer",
+          "minimum": 1800,
+          "maximum": 2200,
+          "description": "探す年代の始まり（西暦・この年を含む）。1800 以上。"
+        },
+        "year_to": {
+          "type": "integer",
+          "minimum": 1800,
+          "maximum": 2200,
+          "description": "探す年代の終わり（西暦・この年を含む）。year_from との差は 30 年ぶんまで。"
+        },
+        "utc_offset": {
+          "type": "number",
+          "minimum": -14,
+          "maximum": 14,
+          "default": 9,
+          "description": "どの土地の時計・暦で読むか（既定 9＝日本時間）。候補日はこの時差の暦日で、時刻の範囲もこの現地時刻（+09:00 のような札が付く）。"
+        }
+      },
+      "required": [
+        "conditions",
+        "year_from",
+        "year_to"
+      ],
       "additionalProperties": false
     },
     "annotations": {

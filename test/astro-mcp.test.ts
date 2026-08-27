@@ -211,7 +211,7 @@ describe("占星術層の initialize / tools/list", () => {
     expect(json.result.protocolVersion).toBe("2025-06-18");
   });
 
-  it("26 本のツールを返す（占星術層 20 本＋カード層 6 本のスーパーセット）", async () => {
+  it("27 本のツールを返す（占星術層 20 本＋カード層 7 本のスーパーセット）", async () => {
     const json = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/list" });
     const names = json.result.tools.map((tool: { name: string }) => tool.name);
     expect(names).toEqual([
@@ -239,13 +239,14 @@ describe("占星術層の initialize / tools/list", () => {
       "four_pillars",
       "pillars_relations",
       "kyusei",
-      // ここからカード層 6 本の同居（2026-08-24 スーパーセット化。定義は公開層と同一）
+      // ここからカード層 7 本の同居（2026-08-24 スーパーセット化。定義は公開層と同一）
       "list_decks",
       "draw_cards",
       "cast_hexagram",
       "roll_astro_dice",
       "cast_geomancy",
       "moon_calendar",
+      "reverse_horoscope",
     ]);
     // 名前はどれも一意（カード層と占星術層で重ならない）
     expect(new Set(names).size).toBe(names.length);
@@ -335,6 +336,7 @@ describe("ルーティング（カード層と 404）", () => {
       "roll_astro_dice",
       "cast_geomancy",
       "moon_calendar",
+      "reverse_horoscope",
     ]);
   });
 
@@ -3506,8 +3508,10 @@ describe("natal_moon_calendar", () => {
 });
 
 describe("知らないツール", () => {
+  // 2026-08-27 まで例に使っていた reverse_horoscope は公開層の 7 本目として本当に生えたので、
+  // 例をこちらへ替えた（この鯖が持たない占術の名前）
   it("isError で返す", async () => {
-    const result = await call("reverse_horoscope", {});
+    const result = await call("palm_reading", {});
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("知らないツールです");
   });

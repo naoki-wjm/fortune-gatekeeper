@@ -47,7 +47,12 @@ const FORBIDDEN_DIRS = ["src/astro/tools/", "src/auth/"];
  * 逆に「必ず入っているはず」のもの。正規表現が壊れて何も拾えなくなったとき、
  * 禁止のほうだけ見ていると全部素通りして緑になってしまうので、空振りをここで止める。
  */
-const EXPECTED_FILES = ["src/mcp.ts", "src/astro/chart.ts", "src/moon-calendar.ts"];
+const EXPECTED_FILES = [
+  "src/mcp.ts",
+  "src/astro/chart.ts",
+  "src/moon-calendar.ts",
+  "src/reverse-horoscope.ts",
+];
 
 // ---------------------------------------------------------------------------
 // ソースを読む
