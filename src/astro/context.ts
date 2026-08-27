@@ -5,7 +5,8 @@
  * そして 2 科以上で使い回している小さな道具だけを置く。中身は移動しただけ。
  */
 import { toolError, type ToolResult } from "../mcp";
-import { AstroError, anglesOf, planetName, type AspectPoint, type SwissEph } from "./chart";
+import { anglesOf, planetName, type AspectPoint, type SwissEph } from "./chart";
+import { EngineInitError } from "../internal-error";
 import { missingChartMessage } from "../phrases";
 import { type AstroKv, type AuthContext, type StoredChart } from "./store";
 
@@ -53,23 +54,64 @@ export interface AstroContext {
 }
 
 /**
+ * 台帳のチャートのうち、**表に出してよいものだけ**を並べた形。
+ * StoredChart から `birth`（預かっている出生データ）を抜いたものと今は同じ中身だが、
+ * 「抜いたもの」ではなく「載せるものの一覧」として別に書いてある（下の publicChart の注記）。
+ */
+export interface PublicChart {
+  label: string;
+  house_system: string;
+  planets: { id: number; lon: number; speed: number }[];
+  cusps: number[];
+  ascmc: number[];
+  created: string;
+  /** リターン・トランジット用の「いつもの場所」（本人が預けたときだけ） */
+  default_location?: { lat: number; lng: number; label?: string };
+}
+
+/**
  * 台帳のチャートから、表に出してよい部分だけを取り出す。
  *
- * 落とすのは `birth`（預かっている出生データ）ひとつ ―― structuredContent に
- * `...stored` を撒くところは必ずこれを通すこと。**出生データは返事に出さない**が約束で、
- * 呼び出し側は登録時に自分で渡しているので読み戻す必要もない。
+ * structuredContent に `...stored` を撒くところは必ずこれを通すこと。
+ * **出生データは返事に出さない**が約束で、呼び出し側は登録時に自分で渡しているので
+ * 読み戻す必要もない。
+ *
+ * ⚠ **落とす方式ではなく載せるものを列挙する方式**（2026-08-27 査読対応）。
+ * もとは `birth` だけを分割代入で外す書き方だった ―― それだと、将来 StoredChart に
+ * 表に出してはいけないものを足した日に、**ここを直し忘れるとそのまま表に出る**。
+ * 列挙する方式なら、足したものは明示的にここへ書くまで出ない（黙って漏れる側に倒れない）。
+ * 配列と入れ子も写し直す＝台帳のオブジェクトを共有しないので、返り値をいじっても台帳に響かない。
  */
-export function publicChart(chart: StoredChart): Omit<StoredChart, "birth"> {
-  const { birth: _birth, ...rest } = chart;
-  return rest;
+export function publicChart(chart: StoredChart): PublicChart {
+  const view: PublicChart = {
+    label: chart.label,
+    house_system: chart.house_system,
+    planets: chart.planets.map((planet) => ({
+      id: planet.id,
+      lon: planet.lon,
+      speed: planet.speed,
+    })),
+    cusps: [...chart.cusps],
+    ascmc: [...chart.ascmc],
+    created: chart.created,
+  };
+  if (chart.default_location) {
+    const place: NonNullable<PublicChart["default_location"]> = {
+      lat: chart.default_location.lat,
+      lng: chart.default_location.lng,
+    };
+    if (chart.default_location.label !== undefined) place.label = chart.default_location.label;
+    view.default_location = place;
+  }
+  return view;
 }
 
 export async function engineOf(context: AstroContext): Promise<SwissEph> {
   try {
     return await context.getEngine();
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new AstroError(`天体計算エンジンを初期化できませんでした: ${detail}`);
+  } catch {
+    // 詳細（wasm の言い分）は表にもログにも出さない ―― 固定文にするのは入口の catch の仕事
+    throw new EngineInitError();
   }
 }
 

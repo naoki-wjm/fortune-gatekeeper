@@ -25,6 +25,7 @@ import {
   type ToolResult,
 } from "../mcp";
 import { ShukuyoError } from "../shukuyo";
+import { EngineInitError, internalFailureMessage } from "../internal-error";
 import { AstroError } from "./chart";
 import { type AstroContext, type AstroTool } from "./context";
 import { PRINCIPLE_NO_SUMMING, PRINCIPLE_SERVER_COMPUTES } from "../phrases";
@@ -180,7 +181,8 @@ const ASTRO_ARGUMENT_KEYS = allowedArgumentKeys(ASTRO_TOOLS);
  * スーパーセット（2026-08-24。無料プランのコネクタ 1 枠でも全部に届くように）。
  * 除外リストではなく「載せるものを列挙して合成する」方式 ―― カード層に共通ツールが増えれば
  * CARD_TOOLS 経由で自動的にここにも載る。逆方向（公開層に個人データの口が混ざる事故）は、
- * 公開層のルーター（index.ts / mcp.ts）が astro モジュールを import しない構造なので起こしようがない。
+ * 公開層が占星術層から借りるのは天体計算の純部品（chart / calendar / events / returns / engine）だけで、
+ * store・auth・tools には触れない構造（test/import-boundary.test.ts で固定）なので起こしようがない。
  */
 const ASTRO_ENTRANCE_TOOLS = [...ASTRO_TOOLS, ...CARD_TOOLS];
 
@@ -219,7 +221,12 @@ async function callAstroTool(
     // 宿曜の純関数の言い分（宿名が読めない・表が壊れている）も、そのまま利用者へ返してよい
     // ―― 出生データは含まれず、書いてあるのは「渡された名前」だけなので
     if (error instanceof ShukuyoError) return toolError(error.message);
-    return toolError(error instanceof Error ? error.message : String(error));
+    // ここから下は内部障害 ―― 例外の message には何が混ざっているか分からない
+    // （chart_id も、預かった出生データも載りうる）ので、固定文＋参照 ID だけを返す
+    if (error instanceof EngineInitError) {
+      return toolError(internalFailureMessage(error, "engine"));
+    }
+    return toolError(internalFailureMessage(error, "unexpected"));
   }
 }
 

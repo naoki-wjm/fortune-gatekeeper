@@ -52,6 +52,18 @@
   // Cloudflare Access for SaaS (OIDC) アプリの値と、承認画面のクッキーを署名する鍵。
   // `npx wrangler secret put <名前>` でセッション外の端末から入れる（会話ログに残さない）。
   // 雛形は .dev.vars.example を参照。
+  // 公開層（POST /mcp）の連打の見張り（2026-08-27 査読対応。Workers の Rate Limiting バインディング）。
+  // 同じ送信元（cf-connecting-ip）から 1 分に 60 回まで。超えたら 429（src/index.ts）。
+  // Zone の WAF レート制限ルールは無料枠で 1 本きりで別サイトが使っているため、Worker 側に置く。
+  // namespace_id はこの Worker の中で見張りを区別する番号（外で作るものではない）。
+  // 鍵つきの入口（/astro/mcp）と OAuth の口はこの枠に入れない。
+  "ratelimits": [
+    {
+      "name": "MCP_RATE_LIMIT",
+      "namespace_id": "1001",
+      "simple": { "limit": 60, "period": 60 }
+    }
+  ],
   "secrets": {
     "required": [
       "ACCESS_CLIENT_ID",

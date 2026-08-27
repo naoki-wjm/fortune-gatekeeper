@@ -926,16 +926,22 @@ npm test
 
 合成はカード名の突合で行い、**名前が見つからない・余る・解説が空**のときはその場で落ちます（生成物が黙ってズレないように）。解説を足しても `tools/list` のツール定義は変わらないので、ChatGPT 側の「更新する」操作は要りません。
 
+sync のあとは `npm test` と `git diff src/data` を見てからコミットしてください（5 ファイルの書き出しは一息ではないので、途中で止まったときは `git checkout src/data` で丸ごと戻せます）。
+
 ## 注意
 
 - `src/data/*.json` は生成物。カード名・一言を直したいときは `fortune-site` 側、解説を直したいときは `meanings/` 側を直して `npm run sync:decks`。**例外は `lenormand.json`**——fortune-site に無いデッキなのでこのリポで手書き（sync は自分の 5 ファイルしか書かないので消えない。札は `number` と `playing_card` を持ち、引いた札の出力にも出る）
 - デッキ JSON のスキーマは統一されていません（`sky` は `meaning`、`enigma` / `tarot` は `meaning_upright` / `meaning_reversed`、`rune` はカード個別の `has_reversed` を持ち、正逆の無い札は `meaning`）。`decks.ts` の `cardHasReversed` と `draw.ts` の `pickMeaning` / `pickExplanation` がその差を吸収します
 - `name_en`（カードの英名）を持つのはタロット系（`tarot` / `tarot_full`）とルノルマンです。意味テキストではないので意味を剥がしたデッキにも残り、引いた札の `name_en` とテキスト出力の括弧併記（例: `ワンドのエース（Ace of Wands）（正位置）`）になります。持たないデッキではキーごと省かれます
 - 設計判断の背骨は3本: **乱数と天体計算はサーバー側で**（LLM に「引いたふり」「計算したふり」をさせない）、**解釈層を持たない**（読むのは会話中の LLM）、**権利の門番**（知られている体系は名前だけ、自作デッキは意味ごと。占星術層は鍵つきで、預かった出生データを返事に出さない）
+- 想定していない例外が出たときは、中身をそのまま返さず**決まった一文と参照 ID**（`reference_id`）だけを返します（例外の文面に出生データやパスが混ざって会話へ流れないように）。手元で追うときは、その ID を頼りにサーバー側の記録（`console.error` に残るのは参照 ID と例外の種類名だけ）と突き合わせてください
+- 公開の入口（`POST /mcp`）には同じ送信元からの連打の見張りがあります（1 分に 60 回まで。超えると 429 と `Retry-After: 60`。Workers の Rate Limiting バインディング `MCP_RATE_LIMIT`。鍵つきの入口と OAuth の口は別枠＝この見張りの外）
+- KV から読んだ台帳のレコードは、使う前に形を確かめます（壊れたレコード・古い形のレコードは、そのまま計算に流さず「登録し直し」の案内へ倒す）
 
 ## ライセンス
 
 - **コード**: [GNU AGPL-3.0](LICENSE)。同梱している [Swiss Ephemeris](https://www.astro.com/swisseph/)（Astrodienst AG）が AGPL-3.0 とプロフェッショナルライセンスのデュアルライセンスであり、本プロジェクトは AGPL-3.0 側を選択しています。`src/astro/sweph/` の wasm ビルドと JS ラッパーは [sweph-wasm](https://github.com/ptprashanttripathi/sweph-wasm) 由来（無改造）、その元は [Swiss Ephemeris](https://github.com/aloistr/swisseph) です。**由来の固定**（2026-08-22 照合）: 3 点とも npm の [`sweph-wasm@2.6.9`](https://www.npmjs.com/package/sweph-wasm/v/2.6.9)（AGPL-3.0-or-later、2025-09-09 公開）の `dist/` と SHA-256 が一致します——`swisseph.wasm` = `dist/wasm/swisseph.wasm`（`b8edc953c490d073f542fce22a9d50df85169fbb2e5e6573ec064df9d0bf622d`）、`swisseph.js` = `dist/wasm/swisseph.js`（`622f30215961d447b028448caf105f78b34b490a0246eae522465bf99bff9a4a`）、`sweph-wasm.js` = `dist/index.js`（`69edbea97573aa8171f40728e08d30d7ddd0c25cf3bf2c903e10e76267f33825`）。組み込まれている Swiss Ephemeris は `swe_version()` の返り値で **2.10.03**。同じバイナリを得たいときは上記バージョンの npm パッケージから取り出してください（`sweph/wasm/swisseph.js` だけはこちらで書いた再エクスポートの薄皮で、複製ではありません）
 - **OAuth 面のコード**: `src/auth/access-handler.ts` と `src/auth/workers-oauth-utils.ts` は、Cloudflare の公式デモ `remote-mcp-cf-access`（MIT）由来のコードを、同じ作者の保管庫MCPの門番 Worker（vault-gatekeeper）経由で複製したものです。**変えたのは承認画面のブランド文言と import だけ**で、ロジックには手を入れていません（差分を追えるようにしてあります）。依存の [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider)（MIT）は npm から入る唯一のランタイム依存です
-- **カードの文言・解説**（空オラクル・エニグマオラクルの `meaning` / `explanation`、`meanings/*.json`）: 作者（和条門尚樹）の著作物で、コードとは別に権利を保持します（単純併存＝mere aggregation であり AGPL の対象外）。デッキテキストの転載・再利用は別途ご相談ください
+- **カードの文言・解説**（空オラクル・エニグマオラクルの `meaning` / `explanation`、`meanings/*.json`）: 作者（和条門尚樹）の著作物で、コードとは別の作品として扱っています（同じリポジトリに同梱していますが、コードの AGPL とは別に権利を保持します。デッキテキストのライセンスは定めていないので、転載・再利用は別途ご相談ください）
 - タロット・ルーンのカード名、六十四卦の卦名は古典・共有文化の範疇です
+- 上の 3 つ（OAuth 面の 2 枚・`@cloudflare/workers-oauth-provider`・`src/astro/sweph/`）について、ライセンス本文を添えて並べ直したものが [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) にあります（由来と SHA-256 の正本はこの節のまま）

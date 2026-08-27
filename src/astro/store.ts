@@ -19,6 +19,7 @@
  *    ⚠ 出生データを持たない古い登録（原本を捨てていた時代のもの）もあるので、`birth` は optional。
  */
 import { cryptoRandom, type RandomSource } from "../random";
+import { AstroError } from "./chart";
 
 /**
  * 許可台帳の中身。
@@ -83,7 +84,15 @@ export interface AstroKv {
   get(key: string): Promise<string | null>;
   put(key: string, value: string): Promise<void>;
   delete(key: string): Promise<void>;
-  list(options: { prefix: string }): Promise<{ keys: { name: string }[] }>;
+  /**
+   * 本物の KV は 1 回の list で全部を返すとは限らない（既定 1,000 件・上限 1,000 件で打ち切り、
+   * `list_complete: false` と `cursor` が返る）。チャートが 1,000 枚を超えることはまず無いが、
+   * 「返ってきたぶんだけ」で一覧を作ると**黙って一部が消える**ので、続きがある間は cursor で回す。
+   */
+  list(options: {
+    prefix: string;
+    cursor?: string;
+  }): Promise<{ keys: { name: string }[]; list_complete?: boolean; cursor?: string }>;
 }
 
 /** chart_id に使う文字（0/o/1/l のような紛らわしい字は外す） */
@@ -210,6 +219,182 @@ export async function createChart(
   );
 }
 
+// ---------------------------------------------------------------------------
+// 読み出しの検算（2026-08-27 査読対応）
+// ---------------------------------------------------------------------------
+
+/**
+ * 台帳から読んだ値が StoredChart の形をしているかを確かめ、**知っているフィールドだけを写した
+ * 新しいオブジェクト**を組み立てて返す（壊れていたら null）。
+ *
+ * `JSON.parse` の結果をそのまま型キャストで通していたのを改めたもの。狙いは 2 つ:
+ *   - 手で書き換えた台帳・古い版の書き込み・途中で切れた JSON が、そのまま計算に流れ込まないこと
+ *     （壊れた値は「NaN の座標」や「undefined の参照」になって、遠くの配線で意味の分からない
+ *       例外になる。入口で断って「登録し直して」と言うほうが早い）
+ *   - **知らないフィールドを落とすこと**＝二重の防波堤。台帳に何か余計なものが混ざっていても、
+ *     publicChart（載せるものを列挙する方式）とここの 2 枚で表には出られない
+ *
+ * `undefined` は「無い」、それ以外の値（null を含む）は「あるのに壊れている」として扱う。
+ * とくに `birth` は、あるのに一部が欠けていたら**レコードごと壊れ扱い**にする
+ * ―― 中途半端な出生データで誕生日系の占術を回すと、黙って別人の結果が出てしまうため。
+ */
+function finiteNumberOf(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function numberInRange(value: unknown, min: number, max: number): number | null {
+  const parsed = finiteNumberOf(value);
+  if (parsed === null || parsed < min || parsed > max) return null;
+  return parsed;
+}
+
+function integerInRange(value: unknown, min: number, max: number): number | null {
+  const parsed = numberInRange(value, min, max);
+  if (parsed === null || !Number.isInteger(parsed)) return null;
+  return parsed;
+}
+
+/** 有限数だけの配列か（長さは呼び出し側で見る） */
+function finiteNumberArray(value: unknown, length: number): number[] | null {
+  if (!Array.isArray(value) || value.length < length) return null;
+  const numbers: number[] = [];
+  for (const entry of value) {
+    const parsed = finiteNumberOf(entry);
+    if (parsed === null) return null;
+    numbers.push(parsed);
+  }
+  return numbers;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function parsePlanets(value: unknown): StoredChart["planets"] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const planets: StoredChart["planets"] = [];
+  for (const entry of value) {
+    const record = recordOf(entry);
+    if (record === null) return null;
+    const id = integerInRange(record["id"], -1000, 1000);
+    const lon = finiteNumberOf(record["lon"]);
+    const speed = finiteNumberOf(record["speed"]);
+    if (id === null || lon === null || speed === null) return null;
+    planets.push({ id, lon, speed });
+  }
+  return planets;
+}
+
+function parseDefaultLocation(value: unknown): StoredChart["default_location"] | null {
+  const record = recordOf(value);
+  if (record === null) return null;
+  const lat = numberInRange(record["lat"], -90, 90);
+  const lng = numberInRange(record["lng"], -180, 180);
+  if (lat === null || lng === null) return null;
+  const place: NonNullable<StoredChart["default_location"]> = { lat, lng };
+  // 呼び名は飾りなので、文字列のときだけ採る（無くても壊れ扱いにはしない）
+  if (typeof record["label"] === "string" && record["label"].length > 0) {
+    place.label = record["label"];
+  }
+  return place;
+}
+
+/** 出生データ。範囲は save_chart の受け付けと同じにそろえてある */
+function parseBirth(value: unknown): StoredChart["birth"] | null {
+  const record = recordOf(value);
+  if (record === null) return null;
+  const year = integerInRange(record["year"], -5000, 5000);
+  const month = integerInRange(record["month"], 1, 12);
+  const day = integerInRange(record["day"], 1, 31);
+  const hour = integerInRange(record["hour"], 0, 23);
+  const minute = integerInRange(record["minute"], 0, 59);
+  const utcOffset = numberInRange(record["utc_offset"], -14, 14);
+  const lat = numberInRange(record["lat"], -90, 90);
+  const lng = numberInRange(record["lng"], -180, 180);
+  if (
+    year === null ||
+    month === null ||
+    day === null ||
+    hour === null ||
+    minute === null ||
+    utcOffset === null ||
+    lat === null ||
+    lng === null
+  ) {
+    return null;
+  }
+  return { year, month, day, hour, minute, utc_offset: utcOffset, lat, lng };
+}
+
+export function parseStoredChart(raw: unknown): StoredChart | null {
+  const record = recordOf(raw);
+  if (record === null) return null;
+
+  // ラベルは 60 文字まで（save_chart の受け付けと同じ）。**空文字は通す** ――
+  // 台帳を手で書き換えた「ラベルの無い図」は壊れているわけではなく、
+  // 表示側にも chart_id だけを見出しにする道がある（synastry の見出し）。
+  // 消して登録し直させるほどのことではないので、ここでは断らない。
+  const label = record["label"];
+  if (typeof label !== "string" || label.length > 60) return null;
+
+  const houseSystem = record["house_system"];
+  if (typeof houseSystem !== "string" || houseSystem.length !== 1) return null;
+
+  const created = record["created"];
+  if (typeof created !== "string" || created.length === 0) return null;
+
+  const planets = parsePlanets(record["planets"]);
+  if (planets === null) return null;
+
+  // カスプは [0] がダミー＋1..12 でちょうど 13 個、ascmc は [0]=ASC / [1]=MC が要る
+  const cusps = finiteNumberArray(record["cusps"], 13);
+  if (cusps === null || cusps.length !== 13) return null;
+  const ascmc = finiteNumberArray(record["ascmc"], 2);
+  if (ascmc === null) return null;
+
+  const chart: StoredChart = {
+    label,
+    house_system: houseSystem,
+    planets,
+    cusps,
+    ascmc,
+    created,
+  };
+
+  if (record["default_location"] !== undefined) {
+    const place = parseDefaultLocation(record["default_location"]);
+    if (place === null) return null;
+    chart.default_location = place;
+  }
+
+  if (record["birth"] !== undefined) {
+    const birth = parseBirth(record["birth"]);
+    if (birth === null) return null;
+    chart.birth = birth;
+  }
+
+  return chart;
+}
+
+/**
+ * 壊れたレコードの言い分。**chart_id 以外は絶対に書かない**
+ * （中身が壊れているということは、何が入っているか分からないということでもある）。
+ */
+export function brokenChartMessage(chartId: string): string {
+  return (
+    `チャート ${chartId} の台帳レコードが壊れていて読めません。` +
+    "delete_chart で消してから save_chart で登録し直してください"
+  );
+}
+
+/**
+ * 台帳から 1 枚読む。
+ *
+ * 見つからなければ null、**壊れていたら AstroError**（JSON として読めない場合も同じ）。
+ * 「無い」と「壊れている」を分けるのは、案内が違うため ―― 前者は chart_id の打ち間違い、
+ * 後者は delete_chart してからの登録し直しで直る。
+ */
 export async function getChart(
   kv: AstroKv,
   user: string,
@@ -218,11 +403,16 @@ export async function getChart(
   if (!isChartId(chartId)) return null;
   const raw = await kv.get(chartKey(user, chartId));
   if (raw === null) return null;
+
+  let parsed: unknown;
   try {
-    return JSON.parse(raw) as StoredChart;
+    parsed = JSON.parse(raw);
   } catch {
-    return null;
+    throw new AstroError(brokenChartMessage(chartId));
   }
+  const chart = parseStoredChart(parsed);
+  if (chart === null) throw new AstroError(brokenChartMessage(chartId));
+  return chart;
 }
 
 export async function deleteChart(kv: AstroKv, user: string, chartId: string): Promise<boolean> {
@@ -234,28 +424,64 @@ export async function deleteChart(kv: AstroKv, user: string, chartId: string): P
   return true;
 }
 
-/** その人のチャート一覧（古い順）。件数はたかが知れているので 1 件ずつ引く */
-export async function listCharts(kv: AstroKv, user: string): Promise<ChartSummary[]> {
+/** list_charts の返り値。壊れて読めなかった登録は一覧から外し、ID だけ添えて知らせる */
+export interface ChartListing {
+  charts: ChartSummary[];
+  /** 台帳レコードが壊れていて読めなかった chart_id（登録し直しの案内に使う） */
+  broken: string[];
+}
+
+/**
+ * その人のチャート一覧（古い順）。件数はたかが知れているので 1 件ずつ引く。
+ *
+ * 壊れた 1 枚で一覧そのものが読めなくなると、消すための chart_id さえ分からなくなるので、
+ * ここだけは AstroError を握って `broken` に積む（他のツールは throw のまま）。
+ * KV の list は続きがある間 cursor で回す。
+ */
+export async function listCharts(kv: AstroKv, user: string): Promise<ChartListing> {
   const prefix = chartPrefix(user);
-  const listed = await kv.list({ prefix });
 
   const summaries: ChartSummary[] = [];
-  for (const entry of listed.keys) {
-    const chartId = entry.name.slice(prefix.length);
-    if (chartId.length === 0) continue;
-    const chart = await getChart(kv, user, chartId);
-    if (!chart) continue;
-    const summary: ChartSummary = {
-      chart_id: chartId,
-      label: chart.label,
-      house_system: chart.house_system,
-      has_birth: chart.birth !== undefined,
-      created: chart.created,
-    };
-    if (chart.default_location) summary.default_location = chart.default_location;
-    summaries.push(summary);
+  const broken: string[] = [];
+  let cursor: string | undefined;
+
+  for (;;) {
+    const listed = await kv.list(cursor === undefined ? { prefix } : { prefix, cursor });
+    for (const entry of listed.keys) {
+      const chartId = entry.name.slice(prefix.length);
+      if (chartId.length === 0) continue;
+
+      let chart: StoredChart | null;
+      try {
+        chart = await getChart(kv, user, chartId);
+      } catch (error) {
+        if (error instanceof AstroError) {
+          broken.push(chartId);
+          continue;
+        }
+        throw error;
+      }
+      if (!chart) continue;
+
+      const summary: ChartSummary = {
+        chart_id: chartId,
+        label: chart.label,
+        house_system: chart.house_system,
+        has_birth: chart.birth !== undefined,
+        created: chart.created,
+      };
+      if (chart.default_location) summary.default_location = chart.default_location;
+      summaries.push(summary);
+    }
+
+    // 続きがあるときだけもう一周（cursor が無ければそこで打ち切り＝無限ループにしない）
+    if (listed.list_complete === false && typeof listed.cursor === "string" && listed.cursor.length > 0) {
+      cursor = listed.cursor;
+      continue;
+    }
+    break;
   }
 
   summaries.sort((a, b) => a.created.localeCompare(b.created));
-  return summaries;
+  return { charts: summaries, broken };
 }

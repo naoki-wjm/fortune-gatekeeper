@@ -140,23 +140,39 @@ async function runSaveChart(rawArguments: unknown, context: AstroContext): Promi
   };
 }
 
+/**
+ * 壊れて読めなかった登録の添え書き（0 件のときは何も足さない）。
+ * 出すのは chart_id だけ ―― 中身が壊れているレコードの中身は書かない。
+ */
+function brokenNote(broken: readonly string[]): string {
+  return (
+    `⚠ 台帳レコードが壊れていて読めない登録: ${broken.join(", ")}` +
+    "（delete_chart で消して登録し直してください）"
+  );
+}
+
 async function runListCharts(context: AstroContext): Promise<ToolResult> {
-  const charts = await listCharts(context.kv, context.auth.user);
+  const { charts, broken } = await listCharts(context.kv, context.auth.user);
+
+  // 壊れた登録があるときだけキーを足す（0 件なら今までどおりの形のまま）
+  const structuredContent: Record<string, unknown> = { charts };
+  if (broken.length > 0) structuredContent["broken_chart_ids"] = broken;
 
   if (charts.length === 0) {
+    const emptyText =
+      "保存済みのチャートはまだありません。\n" +
+      "save_chart に出生データ（年月日・時刻・その土地の時差・緯度経度）を渡すと chart_id が発行され、" +
+      "以後はその ID だけでトランジットを引けます。" +
+      "出生データは計算済みの座標と一緒にこの鍵の台帳に預かります" +
+      "（鍵を持つ人だけが使え、返事には出さず、delete_chart で消えます）。";
     return {
       content: [
         {
           type: "text",
-          text:
-            "保存済みのチャートはまだありません。\n" +
-            "save_chart に出生データ（年月日・時刻・その土地の時差・緯度経度）を渡すと chart_id が発行され、" +
-            "以後はその ID だけでトランジットを引けます。" +
-            "出生データは計算済みの座標と一緒にこの鍵の台帳に預かります" +
-            "（鍵を持つ人だけが使え、返事には出さず、delete_chart で消えます）。",
+          text: broken.length > 0 ? `${emptyText}\n\n${brokenNote(broken)}` : emptyText,
         },
       ],
-      structuredContent: { charts },
+      structuredContent,
     };
   }
 
@@ -180,10 +196,14 @@ async function runListCharts(context: AstroContext): Promise<ToolResult> {
     parts.push(`登録 ${chart.created}`);
     lines.push(parts.join(" / "));
   }
+  if (broken.length > 0) {
+    lines.push("");
+    lines.push(brokenNote(broken));
+  }
 
   return {
     content: [{ type: "text", text: lines.join("\n") }],
-    structuredContent: { charts },
+    structuredContent,
   };
 }
 

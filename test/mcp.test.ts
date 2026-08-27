@@ -618,10 +618,13 @@ describe("tools/call", () => {
       method: "tools/call",
       params: { name: "cast_hexagram", arguments: { nakko: true } },
     });
-    // index.ts が getEngine を渡しているので、スタブの拒否がそのまま言い分になる
+    // index.ts が getEngine を渡しているので、スタブの拒否でエンジンが立ち上がらない。
+    // 返るのは**固定文＋参照 ID** で、スタブの言い分（wasm の中身の話）は表に出さない
+    // ―― 内部障害の message には何が混ざっているか分からないため（2026-08-27 査読対応）
     expect(json.result.isError).toBe(true);
     expect(json.result.content[0].text).toContain("天体計算エンジンを初期化できませんでした");
-    expect(json.result.content[0].text).toContain("テスト環境では wasm を読み込みません");
+    expect(json.result.content[0].text).toMatch(/参照ID: [0-9a-f]{8}$/);
+    expect(json.result.content[0].text).not.toContain("テスト環境では wasm を読み込みません");
   });
 
   it("roll_astro_dice は天体×星座×ハウスの組を返す（引数省略で 1 組）", async () => {
@@ -1058,3 +1061,70 @@ describe("ルーティング", () => {
   });
 });
 
+
+describe("公開層の連打の見張り（MCP_RATE_LIMIT）", () => {
+  const ping = { jsonrpc: "2.0", id: 1, method: "ping" };
+
+  function fakeLimiter(success: boolean): { limiter: RateLimit; keys: string[] } {
+    const keys: string[] = [];
+    const limiter = {
+      async limit(options: { key: string }) {
+        keys.push(options.key);
+        return { success };
+      },
+    } as unknown as RateLimit;
+    return { limiter, keys };
+  }
+
+  async function post(env: Parameters<typeof worker.fetch>[1], ip?: string): Promise<Response> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (ip) headers["cf-connecting-ip"] = ip;
+    return worker.fetch(
+      new Request(ENDPOINT, { method: "POST", headers, body: JSON.stringify(ping) }),
+      env,
+    );
+  }
+
+  it("見張りが居なければ素通し（テスト環境と同じ）", async () => {
+    const response = await post(undefined);
+    expect(response.status).toBe(200);
+  });
+
+  it("送信元の IP を鍵にして見張りを引き、通れば 200", async () => {
+    const { limiter, keys } = fakeLimiter(true);
+    const response = await post({ MCP_RATE_LIMIT: limiter } as any, "203.0.113.7");
+    expect(response.status).toBe(200);
+    expect(keys).toEqual(["203.0.113.7"]);
+  });
+
+  it("超えていれば 429 と Retry-After。返事に IP は書かない", async () => {
+    const { limiter } = fakeLimiter(false);
+    const response = await post({ MCP_RATE_LIMIT: limiter } as any, "203.0.113.7");
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("60");
+    const text = await response.text();
+    expect(JSON.parse(text).error.code).toBe(-32000);
+    expect(text).toContain("呼び出しが多すぎます");
+    expect(text).not.toContain("203.0.113.7");
+  });
+
+  it("見張り自体が失敗したら通す（可用性を優先）", async () => {
+    const limiter = {
+      async limit() {
+        throw new Error("limiter down");
+      },
+    } as unknown as RateLimit;
+    const response = await post({ MCP_RATE_LIMIT: limiter } as any);
+    expect(response.status).toBe(200);
+  });
+
+  it("POST /mcp 以外（/health）は見張りを引かない", async () => {
+    const { limiter, keys } = fakeLimiter(false);
+    const response = await worker.fetch(
+      new Request("http://localhost/health"),
+      { MCP_RATE_LIMIT: limiter } as any,
+    );
+    expect(response.status).toBe(200);
+    expect(keys).toEqual([]);
+  });
+});

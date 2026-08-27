@@ -21,11 +21,19 @@
  * 動かない）に触らずにこのルーターだけをテストから叩けるようにするためです。
  */
 import { CORS_HEADERS, handleMcpRequest, jsonResponse } from "./mcp";
+import { internalFailureMessage } from "./internal-error";
 import { getEngine } from "./astro/engine";
 
 /** Workers のバインディング。ASTRO_KV は占星術層の台帳（許可台帳とチャート） */
 export interface Env {
   ASTRO_KV: KVNamespace;
+  /**
+   * 公開層（POST /mcp）の呼び出し回数の見張り（wrangler.jsonc の `ratelimits`。2026-08-27 査読対応）。
+   * 認証のない入口で wasm の天体計算（moon_calendar は 62 日で 50ms ほど）を誰でも回せるので、
+   * 同じ送信元からの連打だけを断る。鍵つきの入口（/astro/mcp）と OAuth の口はこの枠に入れない。
+   * テスト（env なし）では見張りが居ないので素通し。
+   */
+  MCP_RATE_LIMIT?: RateLimit;
 }
 
 /**
@@ -80,6 +88,39 @@ function methodNotAllowed(): Response {
   );
 }
 
+/**
+ * 同じ送信元（cf-connecting-ip）からの連打かどうか。見張り（バインディング）が無ければ常に false。
+ * 鍵になる IP は返事にもログにも書かない。見張り自体が失敗したときは通す（可用性を優先。
+ * 例外の中身は internal-error.ts の流儀で表に出さないが、ここは握って素通しにする）。
+ */
+async function isRateLimited(request: Request, env: MaybeEnv): Promise<boolean> {
+  const limiter = env?.MCP_RATE_LIMIT;
+  if (!limiter) return false;
+  const key = request.headers.get("cf-connecting-ip") ?? "unknown";
+  try {
+    const outcome = await limiter.limit({ key });
+    return !outcome.success;
+  } catch {
+    return false;
+  }
+}
+
+/** 連打を断る返事（JSON-RPC の形で 429。送信元の情報は書かない） */
+function tooManyRequests(): Response {
+  return jsonResponse(
+    {
+      jsonrpc: "2.0",
+      id: null,
+      error: {
+        code: -32000,
+        message: "呼び出しが多すぎます。少し待ってからもう一度お試しください（同じ送信元からの回数の上限）",
+      },
+    },
+    429,
+    { "Retry-After": "60" },
+  );
+}
+
 export const worker = {
   async fetch(request: Request, _env?: MaybeEnv): Promise<Response> {
     try {
@@ -92,6 +133,7 @@ export const worker = {
 
       if (url.pathname === "/mcp") {
         if (request.method === "POST") {
+          if (await isRateLimited(request, _env)) return tooManyRequests();
           // getEngine は納甲（cast_hexagram の nakko: true）だけが使う。占星術層と同じもの
           return await handleMcpRequest(request, { getEngine });
         }
@@ -108,13 +150,14 @@ export const worker = {
 
       return textResponse("見つかりません（MCP は POST /mcp）", 404);
     } catch (error) {
-      // 例外は握り潰さず、JSON-RPC の内部エラーとして表に出す
-      const detail = error instanceof Error ? error.message : String(error);
+      // 例外は握り潰さず、JSON-RPC の内部エラーとして表に出す ―― ただし**中身は出さない**。
+      // ここまで転がってきた例外の message には何が混ざっているか分からないので、
+      // 固定文と参照 ID だけを返し、突き合わせ用の札はログにだけ落とす（internal-error.ts）
       return jsonResponse(
         {
           jsonrpc: "2.0",
           id: null,
-          error: { code: -32603, message: `内部エラー: ${detail}` },
+          error: { code: -32603, message: internalFailureMessage(error, "unexpected") },
         },
         500,
       );

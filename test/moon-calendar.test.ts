@@ -136,7 +136,7 @@ describe("エンジンが使えないとき", () => {
     );
   });
 
-  it("初期化に失敗したらその中身も添える", async () => {
+  it("初期化に失敗したときは固定文だけ返す（中身は添えない）", async () => {
     const result = await callTool(
       "moon_calendar",
       {},
@@ -147,7 +147,9 @@ describe("エンジンが使えないとき", () => {
     );
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("天体計算エンジンを初期化できませんでした");
-    expect(result.content[0]?.text).toContain("wasm が読めません");
+    expect(result.content[0]?.text).toMatch(/参照ID: [0-9a-f]{8}$/);
+    // 例外の message は表に出さない（何が混ざっているか分からないため。2026-08-27 査読対応）
+    expect(result.content[0]?.text).not.toContain("wasm が読めません");
   });
 
   it("引数が変なときはエンジンを一度も呼ばない", async () => {

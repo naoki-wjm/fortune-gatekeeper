@@ -43,6 +43,7 @@ import {
   type NakkoMoment,
 } from "./nakko";
 import type { SwissEph } from "./astro/chart";
+import { EngineInitError, internalFailureMessage } from "./internal-error";
 
 /** serverInfo.name。占星術層（astro-mcp.ts）も同じ名前を名乗る */
 export const SERVER_NAME = "fortune-gatekeeper";
@@ -105,10 +106,14 @@ export interface ToolResult {
 }
 
 /** JSON レスポンス（CORS 付き） */
-export function jsonResponse(body: unknown, status = 200): Response {
+export function jsonResponse(
+  body: unknown,
+  status = 200,
+  extraHeaders: Record<string, string> = {},
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS, ...extraHeaders },
   });
 }
 
@@ -682,18 +687,20 @@ function parseCastArguments(raw: unknown, now: Date): CastRequest {
 
 /**
  * 天体計算のエンジン。カード層でこれが要るのは納甲（cast_hexagram の nakko: true）と
- * 月まわりの暦（moon_calendar）だけなので、断り文の主語（何が出せないか・何のためのエンジンか）は
+ * 月まわりの暦（moon_calendar）だけなので、断り文の主語（何が出せないか）は
  * 呼び出し側から渡してもらう。
+ *
+ * 「そもそもエンジンが配線されていない」は呼び出し方の話なのでそのまま言う（CastError）。
+ * 「立ち上げに失敗した」は内部障害なので詳細を持たせず、固定文にするのは callTool の catch の仕事。
  */
-async function engineOf(context: CardContext, cannot: string, purpose: string): Promise<SwissEph> {
+async function engineOf(context: CardContext, cannot: string): Promise<SwissEph> {
   if (!context.getEngine) {
     throw new CastError(`この呼び出しでは天体計算エンジンが使えないため${cannot}`);
   }
   try {
     return await context.getEngine();
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new CastError(`${purpose}天体計算エンジンを初期化できませんでした: ${detail}`);
+  } catch {
+    throw new EngineInitError();
   }
 }
 
@@ -713,7 +720,7 @@ async function runCastHexagram(
     };
   }
 
-  const swe = await engineOf(context, "納甲を出せません", "納甲の月支を出す");
+  const swe = await engineOf(context, "納甲を出せません");
   const nakko = buildNakko(result, request.nakko, sunLongitude(swe, request.nakko));
   return {
     content: [
@@ -762,7 +769,7 @@ async function runMoonCalendar(rawArguments: unknown, context: CardContext): Pro
   const now = context.now ? context.now() : new Date();
   // 引数の検算はエンジンより先（断るだけなら wasm に触らずに済む）
   const request = parseMoonCalendarArguments(rawArguments, now);
-  const swe = await engineOf(context, "月まわりの暦を出せません", "月と太陽の位置を出す");
+  const swe = await engineOf(context, "月まわりの暦を出せません");
   const { result, text } = moonCalendar(swe, request);
   return { content: [{ type: "text", text }], structuredContent: result };
 }
@@ -805,9 +812,14 @@ export async function callTool(
       error instanceof DiceError ||
       error instanceof ArgumentError
     ) {
+      // 既知の入力エラーは「渡された引数が変だった」という言い分なのでそのまま返す
       return toolError(error.message);
     }
-    return toolError(error instanceof Error ? error.message : String(error));
+    if (error instanceof EngineInitError) {
+      return toolError(internalFailureMessage(error, "engine"));
+    }
+    // それ以外は何が混ざっているか分からないので、固定文＋参照 ID だけを返す
+    return toolError(internalFailureMessage(error, "unexpected"));
   }
 }
 
