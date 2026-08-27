@@ -267,7 +267,7 @@ Claude が会話の流れから直接「占いを引ける」ようにする MCP
 
 ```
 claude.ai / ChatGPT / Claude Code
-  │ OAuth（DCR・PKCE。実装は @cloudflare/workers-oauth-provider）
+  │ OAuth（DCR・PKCE は S256 のみ。実装は @cloudflare/workers-oauth-provider）
   ▼
 POST /astro/mcp ──初回のサインイン──▶ Cloudflare Access for SaaS (OIDC)
   │                                   （人の身元はここで確かめる）
@@ -832,7 +832,7 @@ fortune-gatekeeper/
   src/astro/engine.ts   … Swiss Ephemeris の wasm を読む唯一の窓口
   src/astro/sweph/*     … sweph-wasm 一式（astro-viewer からの無改造コピー。手を入れない）
   src/auth/oauth.ts     … OAuth の口の接合部（許可台帳の照合 → 占星術層へ）と defaultHandler
-  src/auth/access-handler.ts   … Cloudflare Access (OIDC) との往復（門番 Worker からの複製）
+  src/auth/access-handler.ts   … Cloudflare Access (OIDC) との往復（門番 Worker からの複製。ID トークンの検証強化と、認可要求の不備を OAuth の作法で断る受けだけ足してある）
   src/auth/workers-oauth-utils.ts … 承認画面・CSRF・state（同上。無改造）
   src/auth/env.ts       … OAuth 面のバインディングの型（OAUTH_KV と Secret 6 本）
   scripts/email-hash.mjs … メール → 台帳の鍵名に使うハッシュ（出すのはハッシュだけ）
@@ -941,7 +941,7 @@ sync のあとは `npm test` と `git diff src/data` を見てからコミット
 ## ライセンス
 
 - **コード**: [GNU AGPL-3.0](LICENSE)。同梱している [Swiss Ephemeris](https://www.astro.com/swisseph/)（Astrodienst AG）が AGPL-3.0 とプロフェッショナルライセンスのデュアルライセンスであり、本プロジェクトは AGPL-3.0 側を選択しています。`src/astro/sweph/` の wasm ビルドと JS ラッパーは [sweph-wasm](https://github.com/ptprashanttripathi/sweph-wasm) 由来（無改造）、その元は [Swiss Ephemeris](https://github.com/aloistr/swisseph) です。**由来の固定**（2026-08-22 照合）: 3 点とも npm の [`sweph-wasm@2.6.9`](https://www.npmjs.com/package/sweph-wasm/v/2.6.9)（AGPL-3.0-or-later、2025-09-09 公開）の `dist/` と SHA-256 が一致します——`swisseph.wasm` = `dist/wasm/swisseph.wasm`（`b8edc953c490d073f542fce22a9d50df85169fbb2e5e6573ec064df9d0bf622d`）、`swisseph.js` = `dist/wasm/swisseph.js`（`622f30215961d447b028448caf105f78b34b490a0246eae522465bf99bff9a4a`）、`sweph-wasm.js` = `dist/index.js`（`69edbea97573aa8171f40728e08d30d7ddd0c25cf3bf2c903e10e76267f33825`）。組み込まれている Swiss Ephemeris は `swe_version()` の返り値で **2.10.03**。同じバイナリを得たいときは上記バージョンの npm パッケージから取り出してください（`sweph/wasm/swisseph.js` だけはこちらで書いた再エクスポートの薄皮で、複製ではありません）
-- **OAuth 面のコード**: `src/auth/access-handler.ts` と `src/auth/workers-oauth-utils.ts` は、Cloudflare の公式デモ `remote-mcp-cf-access`（MIT）由来のコードを、同じ作者の保管庫MCPの門番 Worker（vault-gatekeeper）経由で複製したものです。**変えたのは承認画面のブランド文言と import だけ**で、ロジックには手を入れていません（差分を追えるようにしてあります）。依存の [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider)（MIT）は npm から入る唯一のランタイム依存です
+- **OAuth 面のコード**: `src/auth/access-handler.ts` と `src/auth/workers-oauth-utils.ts` は、Cloudflare の公式デモ `remote-mcp-cf-access`（MIT）由来のコードを、同じ作者の保管庫MCPの門番 Worker（vault-gatekeeper）経由で複製したものです。変えたのは承認画面のブランド文言と import のほか、ID トークンの検証を厳しくした箇所（alg / kid / iss / aud / nbf / iat）と、`parseAuthRequest()` が投げる `AuthorizationError`（0.10 から。PKCE なし・`plain` など）を 500 に倒さず OAuth のエラーリダイレクト／400 で断る受け（2026-08-27）だけです（差分を追えるようにしてあります）。依存の [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider)（MIT）は npm から入る唯一のランタイム依存です
 - **カードの文言・解説**（空オラクル・エニグマオラクルの `meaning` / `explanation`、`meanings/*.json`）: 作者（和条門尚樹）の著作物で、コードとは別の作品として扱っています（同じリポジトリに同梱していますが、コードの AGPL とは別に権利を保持します。デッキテキストのライセンスは定めていないので、転載・再利用は別途ご相談ください）
 - タロット・ルーンのカード名、六十四卦の卦名は古典・共有文化の範疇です
 - 上の 3 つ（OAuth 面の 2 枚・`@cloudflare/workers-oauth-provider`・`src/astro/sweph/`）について、ライセンス本文を添えて並べ直したものが [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) にあります（由来と SHA-256 の正本はこの節のまま）

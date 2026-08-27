@@ -25,7 +25,14 @@ export async function handleAccessRequest(
 	const { pathname, searchParams } = new URL(request.url);
 
 	if (request.method === "GET" && pathname === "/authorize") {
-		const oauthReqInfo = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+		let oauthReqInfo: AuthRequest;
+		try {
+			oauthReqInfo = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+		} catch (error) {
+			const refusal = authorizationRefusal(error);
+			if (refusal) return refusal;
+			throw error;
+		}
 		const { clientId } = oauthReqInfo;
 		if (!clientId) {
 			return new Response("Invalid request", { status: 400 });
@@ -200,6 +207,39 @@ async function redirectToAccess(
 		}),
 	);
 	return new Response(null, { headers, status: 302 });
+}
+
+/**
+ * `parseAuthRequest()` が投げる `AuthorizationError`（workers-oauth-provider 0.10 から。PKCE なし・
+ * plain・未知の response_type など、認可要求そのものの不備）を OAuth の作法で断る。
+ * クラスは値 import しない（パッケージが `cloudflare:workers` を読むので Node のテストで動かない）
+ * ＝ `name` で見分ける。`redirectUri` を持つ（＝クライアントと redirect_uri の照合が済んだ）ものだけ
+ * エラーリダイレクト、それ以外は手元で 400。説明文はライブラリの定型文なのでそのまま添える。
+ * 2026-08-27 の 0.10.3 更新で足した手入れ（これが無いと拒否が 500 で返る。手本も未対応）。
+ */
+function authorizationRefusal(error: unknown): Response | null {
+	if (!(error instanceof Error) || error.name !== "AuthorizationError") {
+		return null;
+	}
+	const { code, description, redirectUri, state, issuer } = error as Error & {
+		code?: string;
+		description?: string;
+		redirectUri?: string;
+		state?: string;
+		issuer?: string;
+	};
+	const errorCode = code || "invalid_request";
+	if (redirectUri) {
+		const url = new URL(redirectUri);
+		url.searchParams.set("error", errorCode);
+		if (description) url.searchParams.set("error_description", description);
+		if (state) url.searchParams.set("state", state);
+		if (issuer) url.searchParams.set("iss", issuer);
+		return Response.redirect(url.href, 302);
+	}
+	return new Response(`Invalid request: ${errorCode}${description ? ` (${description})` : ""}`, {
+		status: 400,
+	});
 }
 
 /**

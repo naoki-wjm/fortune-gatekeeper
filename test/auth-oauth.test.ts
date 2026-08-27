@@ -366,6 +366,64 @@ describe("defaultHandler", () => {
     expect(text).not.toContain("見つかりません");
   });
 
+  // 2026-08-27 workers-oauth-provider 0.10 から parseAuthRequest は認可要求の不備を
+  //            AuthorizationError で投げる（PKCE なし・plain など）。500 に倒さず OAuth の作法で断る
+  function authorizationError(extra: Record<string, unknown>): Error {
+    const error = new Error("Public clients must use PKCE with the authorization code flow.");
+    error.name = "AuthorizationError";
+    return Object.assign(error, {
+      code: "invalid_request",
+      description: error.message,
+      ...extra,
+    });
+  }
+
+  it("/authorize: 認可要求の不備で redirect_uri の照合が済んでいればエラーリダイレクト", async () => {
+    const { response } = await through("/authorize", null, "GET", {
+      OAUTH_PROVIDER: {
+        parseAuthRequest: async () => {
+          throw authorizationError({
+            redirectUri: "http://localhost:9999/cb",
+            state: "s1",
+            issuer: "http://localhost",
+          });
+        },
+      },
+    });
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get("Location") ?? "");
+    expect(location.origin + location.pathname).toBe("http://localhost:9999/cb");
+    expect(location.searchParams.get("error")).toBe("invalid_request");
+    expect(location.searchParams.get("error_description")).toContain("PKCE");
+    expect(location.searchParams.get("state")).toBe("s1");
+    expect(location.searchParams.get("iss")).toBe("http://localhost");
+  });
+
+  it("/authorize: 照合前の不備（redirectUri なし）は手元で 400", async () => {
+    const { response, text } = await through("/authorize", null, "GET", {
+      OAUTH_PROVIDER: {
+        parseAuthRequest: async () => {
+          throw authorizationError({});
+        },
+      },
+    });
+    expect(response.status).toBe(400);
+    expect(text).toContain("invalid_request");
+    expect(text).toContain("PKCE");
+  });
+
+  it("/authorize: AuthorizationError 以外の例外は握りつぶさない", async () => {
+    await expect(
+      through("/authorize", null, "GET", {
+        OAUTH_PROVIDER: {
+          parseAuthRequest: async () => {
+            throw new Error("kv down");
+          },
+        },
+      }),
+    ).rejects.toThrow("kv down");
+  });
+
   it("/callback もルーターには落ちず、OAuth の作法でエラーを返す", async () => {
     // state を持たない生の GET なので access-handler が invalid_request を返す
     // ＝ルーターの 404（案内文）ではないことの証拠

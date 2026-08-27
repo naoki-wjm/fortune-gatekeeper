@@ -1,6 +1,6 @@
 {
   "name": "fortune-gatekeeper",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "private": true,
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -20,6 +20,6 @@
     "wrangler": "^4.123.0"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.8.1"
+    "@cloudflare/workers-oauth-provider": "^0.10.3"
   }
 }
