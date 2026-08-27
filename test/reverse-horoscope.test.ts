@@ -20,6 +20,7 @@ import {
   REVERSE_LIMITATIONS,
   REVERSE_MAX_SPAN_YEARS,
   REVERSE_MAX_SPAN_YEARS_SINGLE,
+  SIGN_KEYS,
   parseReverseHoroscopeArguments,
   type ReverseHoroscopeResult,
 } from "../src/reverse-horoscope";
@@ -149,6 +150,151 @@ describe("引数の検算（天体計算より先に断る）", () => {
         year_to: 2000,
       }),
     ).toThrow(/同じ天体を 2 回/);
+  });
+
+  // 2026-08-27 使い込み対応: 太陽から離れすぎた水星・金星は空に存在しないので、探さずに断る
+  describe("太陽と一緒の水星・金星は物理的に届く星座だけ受ける", () => {
+    const S = SIGN_KEYS;
+    function args(conditions: unknown[]): unknown {
+      return { conditions, year_from: 2000, year_to: 2000 };
+    }
+    function accepts(conditions: unknown[]): void {
+      expect(() => parseReverseHoroscopeArguments(args(conditions))).not.toThrow();
+    }
+    function rejects(conditions: unknown[]): void {
+      expect(() => parseReverseHoroscopeArguments(args(conditions))).toThrow(
+        /天文学的に成立しない組み合わせ/,
+      );
+    }
+
+    it("同じ星座はどちらも可", () => {
+      for (const sign of S) {
+        accepts([
+          { body: "sun", sign },
+          { body: "mercury", sign },
+          { body: "venus", sign },
+        ]);
+      }
+    });
+
+    it("水星は ±1 星座まで・±2 は不可（全 12 星座を循環で）", () => {
+      for (let sun = 0; sun < 12; sun++) {
+        for (const offset of [-1, 1]) {
+          accepts([
+            { body: "sun", sign: S[sun] },
+            { body: "mercury", sign: S[(sun + offset + 12) % 12] },
+          ]);
+        }
+        for (const offset of [-2, 2, 6]) {
+          rejects([
+            { body: "sun", sign: S[sun] },
+            { body: "mercury", sign: S[(sun + offset + 12) % 12] },
+          ]);
+        }
+      }
+    });
+
+    it("金星は ±2 星座まで・±3 は不可（全 12 星座を循環で）", () => {
+      for (let sun = 0; sun < 12; sun++) {
+        for (const offset of [-2, -1, 1, 2]) {
+          accepts([
+            { body: "sun", sign: S[sun] },
+            { body: "venus", sign: S[(sun + offset + 12) % 12] },
+          ]);
+        }
+        for (const offset of [-3, 3, 6]) {
+          rejects([
+            { body: "sun", sign: S[sun] },
+            { body: "venus", sign: S[(sun + offset + 12) % 12] },
+          ]);
+        }
+      }
+    });
+
+    it("牡羊座⇔魚座・水瓶座の循環境界（依頼の例そのまま）", () => {
+      // 太陽♈ → 水星♓・♈・♉ は可、♒は不可
+      for (const sign of ["pisces", "aries", "taurus"]) {
+        accepts([{ body: "sun", sign: "aries" }, { body: "mercury", sign }]);
+      }
+      rejects([{ body: "sun", sign: "aries" }, { body: "mercury", sign: "aquarius" }]);
+      // 太陽♓ → 水星♒・♓・♈ は可
+      for (const sign of ["aquarius", "pisces", "aries"]) {
+        accepts([{ body: "sun", sign: "pisces" }, { body: "mercury", sign }]);
+      }
+      rejects([{ body: "sun", sign: "pisces" }, { body: "mercury", sign: "taurus" }]);
+      // 太陽♈ → 金星♒・♓・♈・♉・♊ は可、♑・♋は不可
+      for (const sign of ["aquarius", "pisces", "aries", "taurus", "gemini"]) {
+        accepts([{ body: "sun", sign: "aries" }, { body: "venus", sign }]);
+      }
+      rejects([{ body: "sun", sign: "aries" }, { body: "venus", sign: "capricorn" }]);
+      rejects([{ body: "sun", sign: "aries" }, { body: "venus", sign: "cancer" }]);
+      // 日本語の星座名でも同じ
+      accepts([{ body: "太陽", sign: "牡羊座" }, { body: "水星", sign: "魚座" }]);
+      rejects([{ body: "太陽", sign: "牡羊座" }, { body: "水星", sign: "水瓶座" }]);
+    });
+
+    it("明確な NG 例（太陽 牡羊座・水星 射手座）は探さずに断り、文に両方の星座と届く範囲が入る", () => {
+      expect(() =>
+        parseReverseHoroscopeArguments(
+          args([
+            { body: "sun", sign: "aries" },
+            { body: "mercury", sign: "sagittarius" },
+          ]),
+        ),
+      ).toThrow(/太陽 牡羊座 と 水星 射手座.*魚座 \/ 牡羊座 \/ 牡牛座/);
+    });
+
+    it("required / optional の別にかかわらず弾く・条件の並び順にもよらない", () => {
+      rejects([
+        { body: "sun", sign: "aries", priority: "optional" },
+        { body: "venus", sign: "cancer" },
+      ]);
+      rejects([
+        { body: "venus", sign: "cancer", priority: "optional" },
+        { body: "mercury", sign: "aries" },
+        { body: "sun", sign: "aries" },
+      ]);
+    });
+
+    it("太陽が無ければ検査しない（水星・金星だけから太陽を推定しない）", () => {
+      accepts([
+        { body: "mercury", sign: "aries" },
+        { body: "venus", sign: "libra" },
+      ]);
+      accepts([
+        { body: "moon", sign: "aries" },
+        { body: "mercury", sign: "sagittarius" },
+      ]);
+    });
+
+    it("水星・金星以外は太陽との距離を見ない", () => {
+      accepts([
+        { body: "sun", sign: "aries" },
+        { body: "mars", sign: "libra" },
+        { body: "moon", sign: "libra" },
+        { body: "jupiter", sign: "libra" },
+      ]);
+    });
+
+    it("callTool 経由でも引数エラー（isError）として返り、エンジンに触らない", async () => {
+      let touched = false;
+      const result = await callTool(
+        "reverse_horoscope",
+        args([
+          { body: "sun", sign: "aries" },
+          { body: "mercury", sign: "sagittarius" },
+        ]),
+        {
+          getEngine: async () => {
+            touched = true;
+            return makeReverseEngine();
+          },
+        },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("天文学的に成立しない組み合わせ");
+      expect(touched).toBe(false);
+    });
   });
 
   it("条件の中の綴り違いも黙って無視せず断る", () => {
@@ -432,11 +578,12 @@ describe("窓の交差と暦日への丸め", () => {
   });
 
   it("止まっている天体（偽エンジン）でも当たり／外れがそのまま出る", async () => {
-    // 偽エンジンの水星は 60°＝双子座に止まっている
+    // 偽エンジンの水星は 60°＝双子座に止まっている（太陽は隣の牡牛座に＝水星 ±1 星座の物理ガードの内側。
+    // 偽エンジンの太陽の窓は星座を見ないので、どの星座でも範囲の頭から 100 日）
     const hit = structured(
       await call({
         conditions: [
-          { body: "sun", sign: "aries" },
+          { body: "sun", sign: "taurus" },
           { body: "mercury", sign: "gemini" },
         ],
         year_from: 2000,
@@ -449,7 +596,7 @@ describe("窓の交差と暦日への丸め", () => {
     const miss = structured(
       await call({
         conditions: [
-          { body: "sun", sign: "aries" },
+          { body: "sun", sign: "taurus" },
           { body: "mercury", sign: "牡羊座" },
         ],
         year_from: 2000,
@@ -588,6 +735,7 @@ describe("規約と解釈のなさ", () => {
       other_bodies: "sparse_samples_with_cubic_hermite",
       positions_at: "local_noon",
       utc_offset: 0,
+      inner_planet_sign_guard: "mercury_within_1_sign_and_venus_within_2_signs_of_sun",
       limitations: [
         {
           name: "short_sign_reentry_near_station",

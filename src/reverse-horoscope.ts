@@ -129,6 +129,26 @@ export const REVERSE_MAX_SPAN_YEARS_SINGLE = 10;
 /** 条件の本数の上限（10 天体しかないので、これ以上は必ず重複） */
 const MAX_CONDITIONS = REVERSE_BODIES.length;
 
+/**
+ * 内惑星が太陽から離れられる**星座の数**（物理のガードレール。2026-08-27 使い込み対応）。
+ *
+ * 地球から見た水星の最大離角は約 28°、金星は約 47°。星座は 30° 刻みなので、
+ * 太陽と同じ星座か **水星は前後 1 星座・金星は前後 2 星座**の外には決して居ない。
+ * 小説の性格描写だけから LLM が「太陽牡羊・水星射手」のような配置を提案すると、
+ * 実在しない組み合わせなのに単なる「候補なし」に見えてしまう ―― それを引数エラーとして
+ * 早く断るための表。占星術の読みではなく、空に存在しない入力を弾くだけ。
+ * 12 星座の端は循環（牡羊座の隣は魚座）。
+ *
+ * 太陽が conditions に無いときは何も見ない（水星・金星だけから太陽を推定したりしない）。
+ */
+export const REVERSE_INNER_PLANET_SIGN_LIMITS: Readonly<Partial<Record<ReverseBodyKey, number>>> = {
+  mercury: 1,
+  venus: 2,
+};
+
+/** conventions に載せる名前（水星は太陽の ±1 星座・金星は ±2 星座の内側だけ受ける） */
+export const INNER_PLANET_SIGN_GUARD = "mercury_within_1_sign_and_venus_within_2_signs_of_sun";
+
 /** 返す候補日の上限。超えたぶんは切り、総数と truncated を添える */
 export const MAX_CANDIDATES = 60;
 
@@ -271,6 +291,8 @@ export interface ReverseConventions {
   other_bodies: "sparse_samples_with_cubic_hermite";
   positions_at: "local_noon";
   utc_offset: number;
+  /** 太陽と一緒に指定された水星・金星の星座の物理チェック（`INNER_PLANET_SIGN_GUARD`） */
+  inner_planet_sign_guard: string;
   /** 分かっている取りこぼし（`REVERSE_LIMITATIONS`） */
   limitations: ReverseLimitation[];
 }
@@ -410,6 +432,45 @@ function parseCondition(raw: unknown, index: number): ReverseCondition {
   return { body: parseReverseBody(entry["body"]), signIndex: parseReverseSign(entry["sign"]), priority };
 }
 
+/** 星座の番号の差を循環で測る（0〜6。牡羊座と魚座は 1） */
+export function signDistance(a: number, b: number): number {
+  const diff = Math.abs(a - b) % 12;
+  return Math.min(diff, 12 - diff);
+}
+
+/**
+ * 太陽が条件にあるとき、同時に指定された水星・金星がその太陽の星座から
+ * 物理的に届く範囲（`REVERSE_INNER_PLANET_SIGN_LIMITS`）の内側かを見る。
+ * required / optional の別は見ない ―― 同時に指定された条件同士として空に存在しなければ、
+ * 探しても 0 件にしかならないので、重複天体と同じく引数の段階で断る。
+ * 太陽が無ければ何もしない（水星・金星だけから太陽の位置は決めない）。
+ */
+export function assertInnerPlanetSigns(conditions: readonly ReverseCondition[]): void {
+  const sun = conditions.find((condition) => condition.body === "sun");
+  if (!sun) return;
+  for (const condition of conditions) {
+    const limit = REVERSE_INNER_PLANET_SIGN_LIMITS[condition.body];
+    if (limit === undefined) continue;
+    const distance = signDistance(sun.signIndex, condition.signIndex);
+    if (distance <= limit) continue;
+    const name = planetName(bodyOf(condition.body)?.id ?? -1);
+    throw new AstroError(
+      `天文学的に成立しない組み合わせです: 太陽 ${SIGNS[sun.signIndex]} と ${name} ${SIGNS[condition.signIndex]}` +
+        `（${name}は太陽と同じ星座か前後 ${limit} 星座までにしか居ません。` +
+        `太陽 ${SIGNS[sun.signIndex]} なら ${name}は ${reachableSigns(sun.signIndex, limit)}）`,
+    );
+  }
+}
+
+/** 太陽の星座から届く星座を「牡羊座 / 牡牛座 / …」で並べる（循環順） */
+function reachableSigns(sunIndex: number, limit: number): string {
+  const names: string[] = [];
+  for (let offset = -limit; offset <= limit; offset++) {
+    names.push(SIGNS[(sunIndex + offset + 12) % 12] as string);
+  }
+  return names.join(" / ");
+}
+
 /**
  * reverse_horoscope の引数を読み取る。
  * 天体計算より先に全部弾く ―― 断るだけなら wasm に触らずに済む。
@@ -445,6 +506,7 @@ export function parseReverseHoroscopeArguments(raw: unknown): ReverseHoroscopeRe
     }
     conditions.push(condition);
   }
+  assertInnerPlanetSigns(conditions);
 
   const requiredCount = conditions.filter((condition) => condition.priority === "required").length;
   if (requiredCount === 0) {
@@ -891,6 +953,7 @@ export function buildReverseHoroscope(
       other_bodies: "sparse_samples_with_cubic_hermite",
       positions_at: "local_noon",
       utc_offset: utcOffset,
+      inner_planet_sign_guard: INNER_PLANET_SIGN_GUARD,
       // 分かっている取りこぼしも規約と一緒に返す（読む側が「候補なし」を早合点しないように）
       limitations: REVERSE_LIMITATIONS.map((limitation) => ({ ...limitation })),
     },
