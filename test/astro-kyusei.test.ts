@@ -12,6 +12,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
+import { PLANETS } from "../src/astro/chart";
 import type { AuthContext, StoredChart } from "../src/astro/store";
 import { board, formatSatsuText, satsu, starOf, type BoardKind } from "../src/kyusei";
 import { FakeKv } from "./stubs/fake-kv";
@@ -103,12 +104,21 @@ async function saveChart(): Promise<string> {
   return saved.structuredContent.chart_id as string;
 }
 
+/**
+ * 台帳へ直に置くチャートの天体（chart.ts の PLANETS ＝ 11 天体）。
+ * `parseStoredChart` は件数と ID の集合がちょうど一致することを見るので、
+ * 手書きの「1 天体だけ」のレコードはもう通らない（2026-08-27 査読 I-2）。
+ */
+function storedPlanets(): { id: number; lon: number; speed: number }[] {
+  return PLANETS.map((planet, index) => ({ id: planet.id, lon: (index * 30) % 360, speed: 1 }));
+}
+
 /** 出生データを預からなかった時代の登録を再現する（台帳へ直接置く） */
 function putLegacyChart(chartId = "legacy01", user = "user1"): string {
   const legacy: StoredChart = {
     label: "むかしの図",
     house_system: "P",
-    planets: [{ id: 0, lon: 0, speed: 1 }],
+    planets: storedPlanets(),
     cusps: [...FAKE_CUSPS],
     ascmc: [...FAKE_ASCMC],
     created: "2026-08-01T00:00:00.000Z",
@@ -517,7 +527,10 @@ describe("kyusei", () => {
 
     const badBirth = await call("kyusei", { year: 2022, month: 2, day: 31 });
     expect(badBirth.isError).toBe(true);
-    expect(badBirth.content[0].text).toContain("2022-02-31 は暦に存在しない日付です");
+    // 出生の側は**値を書き返さない**（2026-08-27 査読 I-1）。対象日の側は今までどおり値を出す
+    expect(badBirth.content[0].text).toContain("出生の年月日が暦に存在しない組み合わせです");
+    expect(badBirth.content[0].text).not.toContain("2022");
+    expect(badBirth.content[0].text).not.toContain("2022-02-31");
 
     const badDate = await call("kyusei", { chart_id: chartId, date: "2026-02-30" });
     expect(badDate.isError).toBe(true);

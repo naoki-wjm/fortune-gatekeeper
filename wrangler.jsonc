@@ -57,11 +57,22 @@
   // Zone の WAF レート制限ルールは無料枠で 1 本きりで別サイトが使っているため、Worker 側に置く。
   // namespace_id はこの Worker の中で見張りを区別する番号（外で作るものではない）。
   // 鍵つきの入口（/astro/mcp）と OAuth の口はこの枠に入れない。
+  //
+  // 2 本目は重いツール（reverse_horoscope）専用の枠（2026-08-27 再査読対応）。
+  // いちばん重い形（required 1 本 × 10 年）は手元の Node で約 0.1 秒、Workers 実機はその
+  // 2〜5 倍なので 0.2〜0.5 秒。60 回/分の枠では 1 人で 1 分ぶんの CPU を使い切れてしまうため、
+  // この 1 本だけ 6 回/分に絞る（上の 60 回/分の内側でさらに引く＝両方を通らないと走らない）。
+  // 鍵つきの入口（/astro/mcp）から呼ぶぶんは認証済みなので、こちらの枠には入れない。
   "ratelimits": [
     {
       "name": "MCP_RATE_LIMIT",
       "namespace_id": "1001",
       "simple": { "limit": 60, "period": 60 }
+    },
+    {
+      "name": "REVERSE_RATE_LIMIT",
+      "namespace_id": "1002",
+      "simple": { "limit": 6, "period": 60 }
     }
   ],
   "secrets": {

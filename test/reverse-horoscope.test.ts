@@ -17,7 +17,9 @@ import { describe, expect, it } from "vitest";
 import { callTool, handleMcpRequest, type ToolResult } from "../src/mcp";
 import {
   MAX_CANDIDATES,
+  REVERSE_LIMITATIONS,
   REVERSE_MAX_SPAN_YEARS,
+  REVERSE_MAX_SPAN_YEARS_SINGLE,
   parseReverseHoroscopeArguments,
   type ReverseHoroscopeResult,
 } from "../src/reverse-horoscope";
@@ -177,7 +179,11 @@ describe("引数の検算（天体計算より先に断る）", () => {
   });
 
   it("year_from / year_to は必須の整数で、暦の範囲と 30 年ぶんの枠がある", () => {
-    const conditions = [{ body: "sun", sign: "aries" }];
+    // required が 2 本ある形（1 本だけのときの枠は次のテスト）
+    const conditions = [
+      { body: "sun", sign: "aries" },
+      { body: "moon", sign: "cancer" },
+    ];
     expect(() => parseReverseHoroscopeArguments({ conditions, year_to: 2000 })).toThrow(
       /year_from は必須/,
     );
@@ -203,6 +209,94 @@ describe("引数の検算（天体計算より先に断る）", () => {
     expect(() =>
       parseReverseHoroscopeArguments({ conditions, year_from: 2000, year_to: 2030 }),
     ).toThrow(new RegExp(`${REVERSE_MAX_SPAN_YEARS} 年ぶんまで`));
+  });
+
+  // 2026-08-27 再査読対応（I-4）: required が 1 本だけの形は絞りが効かず、いちばん重い
+  it("required が 1 本だけのときは 10 年ぶんまで（2 本以上なら 30 年のまま）", () => {
+    const single = [{ body: "mercury", sign: "pisces" }];
+    // 10 年ぶん（両端を含む）は通る
+    expect(
+      parseReverseHoroscopeArguments({ conditions: single, year_from: 2000, year_to: 2009 }).yearTo,
+    ).toBe(2009);
+    // 11 年ぶんから断る
+    expect(() =>
+      parseReverseHoroscopeArguments({ conditions: single, year_from: 2000, year_to: 2010 }),
+    ).toThrow(new RegExp(`required の条件が 1 本だけのときは ${REVERSE_MAX_SPAN_YEARS_SINGLE} 年ぶんまで`));
+
+    // optional を足しても「required 1 本」は変わらない（候補日を決めるのは required だけ）
+    expect(() =>
+      parseReverseHoroscopeArguments({
+        conditions: [...single, { body: "sun", sign: "aries", priority: "optional" }],
+        year_from: 2000,
+        year_to: 2010,
+      }),
+    ).toThrow(new RegExp(`${REVERSE_MAX_SPAN_YEARS_SINGLE} 年ぶんまで`));
+
+    // required を 2 本にすれば 30 年ぶんまで見られる
+    expect(
+      parseReverseHoroscopeArguments({
+        conditions: [...single, { body: "sun", sign: "aries" }],
+        year_from: 2000,
+        year_to: 2029,
+      }).yearTo,
+    ).toBe(2029);
+  });
+
+  it("断り文には渡された文字列を写さない（数字と固定文だけ）", () => {
+    let message = "";
+    try {
+      parseReverseHoroscopeArguments({
+        conditions: [{ body: "mercury", sign: "pisces" }],
+        year_from: 2000,
+        year_to: 2020,
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("21 年");
+    expect(message).toContain("required");
+    expect(message).not.toContain("mercury");
+    expect(message).not.toContain("pisces");
+  });
+
+  // 2026-08-27 再査読対応（Minor-2）: 認証の無い入口なので、写す量に蓋をする
+  it("知らない名前を写すときは 80 字で切る", () => {
+    const long = "水".repeat(200);
+    for (const args of [
+      { conditions: [{ body: long, sign: "aries" }], year_from: 2000, year_to: 2000 },
+      { conditions: [{ body: "sun", sign: long }], year_from: 2000, year_to: 2000 },
+      { conditions: [{ body: "sun", sign: "aries", [long]: 1 }], year_from: 2000, year_to: 2000 },
+    ]) {
+      let message = "";
+      try {
+        parseReverseHoroscopeArguments(args);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain(`${"水".repeat(80)}…`);
+      expect(message).not.toContain("水".repeat(81));
+    }
+  });
+
+  it("切るのは文字（コードポイント）単位＝絵文字が割れない", () => {
+    const long = "🌙".repeat(100);
+    let message = "";
+    try {
+      parseReverseHoroscopeArguments({
+        conditions: [{ body: long, sign: "aries" }],
+        year_from: 2000,
+        year_to: 2000,
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain(`${"🌙".repeat(80)}…`);
+    // 割れた片割れ（サロゲート 1 個だけ）が混ざっていない
+    // ―― Array.from はコードポイント単位で刻むので、割れていれば長さ 1 の欠片が出る
+    const orphan = Array.from(message).some(
+      (character) => character.length === 1 && character >= "\uD800" && character <= "\uDFFF",
+    );
+    expect(orphan).toBe(false);
   });
 
   it("utc_offset は -14〜14 の数値（既定 9）", () => {
@@ -494,7 +588,37 @@ describe("規約と解釈のなさ", () => {
       other_bodies: "sparse_samples_with_cubic_hermite",
       positions_at: "local_noon",
       utc_offset: 0,
+      limitations: [
+        {
+          name: "short_sign_reentry_near_station",
+          note: expect.stringContaining("留が星座の境のすぐ内側") as unknown as string,
+        },
+        {
+          name: "no_candidates_is_not_proof",
+          note: expect.stringContaining("候補なし") as unknown as string,
+        },
+      ],
     });
+  });
+
+  // 2026-08-27 再査読対応（I-3）: 分かっている取りこぼしを黙っていない
+  it("限界は返り値とテキストの両方に載る", async () => {
+    const result = await call(SUN_ONLY);
+    const data = structured(result);
+    // 正文は 1 か所（REVERSE_LIMITATIONS）から来る
+    expect(data.conventions.limitations).toEqual([...REVERSE_LIMITATIONS]);
+    // 呼び出し側が書き換えても台帳が汚れない（写しを返している）
+    expect(data.conventions.limitations[0]).not.toBe(REVERSE_LIMITATIONS[0]);
+
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain("⚠ 近似探索です");
+    expect(text).toContain("水星〜火星で 1 時間未満・木星〜冥王星で 4 時間未満");
+    expect(text).toContain("候補なし＝必ず該当なし、ではありません");
+    // 「規約:」の行の次に出る
+    const lines = text.split("\n");
+    const conventionsLine = lines.findIndex((line) => line.startsWith("規約: "));
+    expect(conventionsLine).toBeGreaterThan(0);
+    expect(lines[conventionsLine + 1]).toContain("⚠ 近似探索です");
   });
 
   it("読みは呼び出した側（解釈は 1 文字も載せない）", async () => {
@@ -505,6 +629,69 @@ describe("規約と解釈のなさ", () => {
     // 体系の数は書かない（占術は増えるので）
     expect(text).not.toContain("三体系");
     expect(text).not.toContain("四体系");
+  });
+});
+
+/**
+ * 書いてある限界（`REVERSE_LIMITATIONS`）が本当にその通りかを、偽の空で固定する。
+ *
+ * 本物の空で「境のすぐ内側で留になる」形は 1800〜2200 年にちゃんとあり、いちばん浅いものでも
+ * 7.65 時間ある＝ぜんぶ拾えている（test/reverse-horoscope-real.test.ts）。つまり**取りこぼす側**は
+ * 実物では起こせないので、ここで作る。
+ *
+ * 作り: 水星（1 日刻み＝補間の上を **1 時間ごと**に歩く側）を、牡牛座の入口 30° のすぐ内側で
+ * 上に凸の放物線に乗せる ―― `lon(d) = 30 + peak − (a/2)·d²`（d は留からの日数、a は水星なみの
+ * 0.07 °/日²）。放物線は 3 次エルミート補間が**誤差なく**再現できるので、拾える／拾えないを
+ * 決めるのは歩く刻みだけになる。留の時刻は 12:30 に置いてある＝格子（毎正時）のちょうど真ん中。
+ */
+describe("書いてある限界（刻みより短い「行って戻る」）", () => {
+  /** 留の時刻＝範囲の頭から 100 日と 12 時間 30 分（格子の目のちょうど真ん中） */
+  const STATION_JD = RANGE_START_JD + 100.5 + 1 / 48;
+  /** 留のまわりで放物線に乗せる幅（日）。外側は平ら＝牡羊座に居座る */
+  const QUADRATIC_DAYS = 3.5;
+  /** 水星なみの「留のまわりの曲がり」（度／日²） */
+  const CURVATURE = 0.07;
+
+  /** `hours` 時間だけ牡牛座（30°）に入って戻る水星を仕込んだ偽エンジン */
+  function makeStationEngine(hours: number): FakeEngine {
+    const fake = makeReverseEngine();
+    const peak = (CURVATURE / 2) * (hours / 48) ** 2;
+    const base = fake.swe_calc_ut;
+    fake.swe_calc_ut = (jd: number, planetId: number, flags: number): number[] => {
+      if (planetId !== 2) return base(jd, planetId, flags);
+      const delta = jd - STATION_JD;
+      if (Math.abs(delta) > QUADRATIC_DAYS) {
+        return [30 + peak - (CURVATURE / 2) * QUADRATIC_DAYS ** 2, 0, 1, 0, 0, 0];
+      }
+      return [30 + peak - (CURVATURE / 2) * delta ** 2, 0, 1, -CURVATURE * delta, 0, 0];
+    };
+    return fake;
+  }
+
+  const MERCURY_TAURUS = {
+    conditions: [{ body: "mercury", sign: "taurus" }],
+    year_from: 2000,
+    year_to: 2000,
+    utc_offset: 0,
+  };
+
+  it("2 時間の出入り（1 時間の刻みより長い）は拾う", async () => {
+    const data = structured(await call(MERCURY_TAURUS, makeStationEngine(2)));
+    expect(data.total).toBe(1);
+    expect(data.candidates[0]?.date).toBe("2000-04-10");
+    expect(data.candidates[0]?.all_day).toBe(false);
+    expect(data.candidates[0]?.time_ranges).toEqual([
+      { start: "2000-04-10 11:30+00:00", end: "2000-04-10 13:30+00:00" },
+    ]);
+  });
+
+  it("30 分の出入り（1 時間の刻みより短い）は拾えない＝書いてある穴", async () => {
+    const data = structured(await call(MERCURY_TAURUS, makeStationEngine(0.5)));
+    expect(data.total).toBe(0);
+    // 「候補なし」でも、必ず該当なしとは限らない ―― その断りが返り値とテキストに付いている
+    expect(data.conventions.limitations.map((limitation) => limitation.name)).toContain(
+      "no_candidates_is_not_proof",
+    );
   });
 });
 

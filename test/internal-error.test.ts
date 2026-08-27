@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EngineInitError, internalFailureMessage } from "../src/internal-error";
 import { callTool as callCardTool } from "../src/mcp";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
+import { PLANETS } from "../src/astro/chart";
 import { type AuthContext, type StoredChart } from "../src/astro/store";
 import { FakeKv } from "./stubs/fake-kv";
 import { makeFakeEngine, type FakeEngine } from "./stubs/fake-engine";
@@ -44,10 +45,11 @@ function chartRecord(): StoredChart {
   return {
     label: "サンプル",
     house_system: "P",
-    planets: [
-      { id: 0, lon: 10, speed: 1 },
-      { id: 1, lon: 40, speed: 13 },
-    ],
+    planets: PLANETS.map((planet, index) => ({
+      id: planet.id,
+      lon: (index * 30 + 10) % 360,
+      speed: 1,
+    })),
     cusps: [0, 90, 120, 150, 180, 210, 240, 270, 300, 330, 0, 30, 60],
     ascmc: [90, 300, 0, 0, 0, 0, 0, 0],
     default_location: { lat: 35, lng: 139 },

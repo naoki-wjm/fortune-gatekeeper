@@ -23,7 +23,7 @@ import {
   type MomentInput,
   type PlanetPosition,
 } from "../chart";
-import { assertCalendarDay } from "../calendar";
+import { assertBirthCalendarDay } from "../calendar";
 import {
   aspectPointsOf,
   engineOf,
@@ -45,9 +45,9 @@ import {
   optionalBoolean,
   optionalNumber,
   optionalString,
+  requireBirthInteger,
+  requireBirthNumber,
   requireHouseSystem,
-  requireInteger,
-  requireNumber,
   requireString,
 } from "../tool-args";
 
@@ -59,17 +59,20 @@ async function runSaveChart(rawArguments: unknown, context: AstroContext): Promi
   const args = argsOf(rawArguments);
 
   const label = requireString(args, "label", 60);
+  // 出生の 8 つは「断り文に値を書かない」ほうで受ける（範囲外の打ち間違いも出生データには違いない）。
+  // default_lat / default_lng は「いつもの場所」＝本人が明示的に預けた覚え書きで、
+  // 登録の返事にもそのまま出している値なので、今までどおり値を出すほうで受ける。
   const moment: MomentInput = {
-    year: requireInteger(args, "year", -5000, 5000),
-    month: requireInteger(args, "month", 1, 12),
-    day: requireInteger(args, "day", 1, 31),
-    hour: requireInteger(args, "hour", 0, 23),
-    minute: requireInteger(args, "minute", 0, 59),
-    utcOffset: requireNumber(args, "utc_offset", -14, 14),
+    year: requireBirthInteger(args, "year", -5000, 5000),
+    month: requireBirthInteger(args, "month", 1, 12),
+    day: requireBirthInteger(args, "day", 1, 31),
+    hour: requireBirthInteger(args, "hour", 0, 23),
+    minute: requireBirthInteger(args, "minute", 0, 59),
+    utcOffset: requireBirthNumber(args, "utc_offset", -14, 14),
   };
-  assertCalendarDay(moment.year, moment.month, moment.day);
-  const lat = requireNumber(args, "lat", -90, 90);
-  const lng = requireNumber(args, "lng", -180, 180);
+  assertBirthCalendarDay(moment.year, moment.month, moment.day);
+  const lat = requireBirthNumber(args, "lat", -90, 90);
+  const lng = requireBirthNumber(args, "lng", -180, 180);
   const houseSystem = requireHouseSystem(args);
 
   const defaultLat = optionalNumber(args, "default_lat", -90, 90);

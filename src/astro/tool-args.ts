@@ -21,21 +21,64 @@ export function argsOf(raw: unknown): Record<string, unknown> {
   return raw as Record<string, unknown>;
 }
 
+/**
+ * 断り文の末尾に**来た値を書き添えるか**（2026-08-27 査読 I-1）。
+ *
+ * 既定は "show" ―― 対象日・オーブ・日数のような引数は、何を渡したかが分からないと直しようがない。
+ * 出生データの引数（year / month / day / hour / minute / utc_offset / lat / lng）だけは "hide"。
+ * 鯖の約束は「返事（テキスト・structuredContent・**エラー文**）に出生データそのものを出さない」で、
+ * 範囲を外した打ち間違いもまた出生データの候補には違いないため。
+ */
+type ValueEcho = "show" | "hide";
+
+/** 断り文の末尾（値を出す／出さない） */
+function echoTail(echo: ValueEcho, value: unknown): string {
+  return echo === "show" ? `: ${String(value)}` : "（値は返事に出しません）";
+}
+
+function numberArg(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+  echo: ValueEcho,
+): number | undefined {
+  const value = args[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    // 型違いは値を書いていない（もともと書いていなかった）ので echo を見る必要が無い
+    throw new AstroError(`${key} は数値で指定してください`);
+  }
+  if (value < min || value > max) {
+    throw new AstroError(
+      `${key} は ${min} 以上 ${max} 以下で指定してください${echoTail(echo, value)}`,
+    );
+  }
+  return value;
+}
+
+function integerArg(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+  echo: ValueEcho,
+): number | undefined {
+  const value = numberArg(args, key, min, max, echo);
+  if (value === undefined) return undefined;
+  if (!Number.isInteger(value)) {
+    throw new AstroError(`${key} は整数で指定してください${echoTail(echo, value)}`);
+  }
+  return value;
+}
+
 export function optionalNumber(
   args: Record<string, unknown>,
   key: string,
   min: number,
   max: number,
 ): number | undefined {
-  const value = args[key];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new AstroError(`${key} は数値で指定してください`);
-  }
-  if (value < min || value > max) {
-    throw new AstroError(`${key} は ${min} 以上 ${max} 以下で指定してください: ${value}`);
-  }
-  return value;
+  return numberArg(args, key, min, max, "show");
 }
 
 export function requireNumber(
@@ -55,10 +98,7 @@ export function optionalInteger(
   min: number,
   max: number,
 ): number | undefined {
-  const value = optionalNumber(args, key, min, max);
-  if (value === undefined) return undefined;
-  if (!Number.isInteger(value)) throw new AstroError(`${key} は整数で指定してください: ${value}`);
-  return value;
+  return integerArg(args, key, min, max, "show");
 }
 
 export function requireInteger(
@@ -68,6 +108,55 @@ export function requireInteger(
   max: number,
 ): number {
   const value = optionalInteger(args, key, min, max);
+  if (value === undefined) throw new AstroError(`${key} は必須です`);
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// 出生データの引数（断り文に値を書かない版。2026-08-27 査読 I-1）
+// ---------------------------------------------------------------------------
+
+/**
+ * 出生データの数値引数（utc_offset / lat / lng）。範囲外でも**値を書き返さない**。
+ * 受け付ける範囲そのものは断り文に出す ―― それは呼び出し側が渡した値ではないため。
+ */
+export function optionalBirthNumber(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): number | undefined {
+  return numberArg(args, key, min, max, "hide");
+}
+
+export function requireBirthNumber(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): number {
+  const value = optionalBirthNumber(args, key, min, max);
+  if (value === undefined) throw new AstroError(`${key} は必須です`);
+  return value;
+}
+
+/** 出生データの整数引数（year / month / day / hour / minute）。同上 */
+export function optionalBirthInteger(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): number | undefined {
+  return integerArg(args, key, min, max, "hide");
+}
+
+export function requireBirthInteger(
+  args: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): number {
+  const value = optionalBirthInteger(args, key, min, max);
   if (value === undefined) throw new AstroError(`${key} は必須です`);
   return value;
 }

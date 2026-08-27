@@ -3,15 +3,18 @@
  * ―― astro-mcp.ts から切り出した共通部品。
  *
  * 「出生の瞬間を chart_id と直接指定のどちらから取るか」と、
- * 「日運を見る日をどう決めるか」の 2 つだけを持つ。断り文は元のまま。
+ * 「日運を見る日をどう決めるか」の 2 つだけを持つ。
+ *
+ * ⚠ 出生の側の断り文には**渡された値を書かない**（2026-08-27 査読 I-1）。日運の側＝`parseFortuneDate`
+ *    は検索の対象日なので今までどおり値を出す。
  */
 import { toolError, type ToolResult } from "../mcp";
 import { AstroError, type MomentInput } from "./chart";
-import { assertCalendarDay, utcDateFromLocal } from "./calendar";
+import { assertBirthCalendarDay, assertCalendarDay, utcDateFromLocal } from "./calendar";
 import { type AstroContext } from "./context";
 import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../phrases";
 import { getChart } from "./store";
-import { optionalInteger, optionalNumber, optionalString } from "./tool-args";
+import { optionalBirthInteger, optionalBirthNumber, optionalString } from "./tool-args";
 
 /** 出生の瞬間と、その出どころ（返事の見出しに使う。値そのものは出さない） */
 export interface BirthMoment {
@@ -96,12 +99,13 @@ export async function resolveBirthMoment(
   options: BirthMomentOptions,
 ): Promise<BirthMoment | { error: ToolResult }> {
   const chartId = optionalString(args, "chart_id", 32);
-  const year = optionalInteger(args, "year", options.yearMin, options.yearMax);
-  const month = optionalInteger(args, "month", 1, 12);
-  const day = optionalInteger(args, "day", 1, 31);
-  const hour = optionalInteger(args, "hour", 0, 23);
-  const minute = optionalInteger(args, "minute", 0, 59);
-  const utcOffset = optionalNumber(args, "utc_offset", -14, 14);
+  // 出生の 6 つは「値を書き返さない」ほうで受ける（範囲外の打ち間違いも出生日の候補には違いない）
+  const year = optionalBirthInteger(args, "year", options.yearMin, options.yearMax);
+  const month = optionalBirthInteger(args, "month", 1, 12);
+  const day = optionalBirthInteger(args, "day", 1, 31);
+  const hour = optionalBirthInteger(args, "hour", 0, 23);
+  const minute = optionalBirthInteger(args, "minute", 0, 59);
+  const utcOffset = optionalBirthNumber(args, "utc_offset", -14, 14);
   const givenBirth = [year, month, day, hour, minute, utcOffset].filter(
     (value) => value !== undefined,
   ).length;
@@ -124,7 +128,7 @@ export async function resolveBirthMoment(
     if (!options.timeOptional && (hour === undefined || minute === undefined)) {
       throw new AstroError(missingBirthFieldsMessage(options));
     }
-    assertCalendarDay(year, month, day);
+    assertBirthCalendarDay(year, month, day);
     return {
       moment: {
         year,

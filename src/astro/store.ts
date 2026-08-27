@@ -19,7 +19,8 @@
  *    ⚠ 出生データを持たない古い登録（原本を捨てていた時代のもの）もあるので、`birth` は optional。
  */
 import { cryptoRandom, type RandomSource } from "../random";
-import { AstroError } from "./chart";
+import { isCalendarDay } from "./calendar";
+import { AstroError, HOUSE_SYSTEM_CODES, PLANETS } from "./chart";
 
 /**
  * 許可台帳の中身。
@@ -254,33 +255,68 @@ function integerInRange(value: unknown, min: number, max: number): number | null
   return parsed;
 }
 
-/** 有限数だけの配列か（長さは呼び出し側で見る） */
-function finiteNumberArray(value: unknown, length: number): number[] | null {
-  if (!Array.isArray(value) || value.length < length) return null;
+/**
+ * 黄経の配列（カスプ・ASC/MC ほか）。**長さちょうど**で、どれも 0 以上 360 未満の有限数。
+ *
+ * 長さを「以上」でなく「ちょうど」にしてあるのは、**余分な要素そのものが漏れ口**だから
+ * ―― publicChart は cusps / ascmc を丸ごと写して structuredContent に載せるので、
+ * 13 個目・9 個目に何か書き足されていたらそのまま表に出てしまう（2026-08-27 査読 I-2）。
+ */
+function degreeArray(value: unknown, length: number): number[] | null {
+  if (!Array.isArray(value) || value.length !== length) return null;
   const numbers: number[] = [];
   for (const entry of value) {
-    const parsed = finiteNumberOf(entry);
-    if (parsed === null) return null;
+    const parsed = numberInRange(entry, 0, 360);
+    if (parsed === null || parsed === 360) return null;
     numbers.push(parsed);
   }
   return numbers;
 }
+
+/**
+ * カスプの個数（[0] はダミー＋1..12）。
+ * sweph の wrapper が `swe_houses` で返す長さそのもの（ゴキエリン方式 "G" だけ 37 だが、
+ * 受け付けるハウス方式は P / K / W / E の 4 つなので 13 で固定できる）。
+ */
+const CUSPS_LENGTH = 13;
+
+/**
+ * ascmc の個数。wrapper は `swe_houses` の ascmc を**必ず 8 個**に切りそろえて返す
+ * （[0]=ASC / [1]=MC / [2]=ARMC / [3]=Vertex / [4]=イコールアセンダント /
+ *   [5]=co-ascendant(Koch) / [6]=co-ascendant(Munkasey) / [7]=polar ascendant）。
+ * 使うのは [0] と [1] だけだが、save_chart は 8 個そのままを預けている。
+ */
+const ASCMC_LENGTH = 8;
+
+/** 期待する天体 ID の集合（chart.ts の PLANETS ＝ save_chart が必ず書く 11 個） */
+const EXPECTED_PLANET_IDS: ReadonlySet<number> = new Set(PLANETS.map((planet) => planet.id));
 
 function recordOf(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
 }
 
+/**
+ * 天体の並び。**期待する ID の集合とちょうど一致**していること（欠落・重複・未知 ID は不可）。
+ *
+ * 「知っているフィールドだけ写す」だけでは足りない ―― publicChart は planets を丸ごと写すので、
+ * 11 個の後ろに 12 個目を書き足されたら、その `lon` に入れた数字がそのまま表に出る。
+ * 件数と ID の集合を固定すれば、混ぜられるのは「11 天体のどれかの座標」だけになる
+ * （そこは元から表に出る値）。並び順は問わない ―― 読む側は id で引くため。
+ */
 function parsePlanets(value: unknown): StoredChart["planets"] | null {
-  if (!Array.isArray(value) || value.length === 0) return null;
+  if (!Array.isArray(value) || value.length !== EXPECTED_PLANET_IDS.size) return null;
   const planets: StoredChart["planets"] = [];
+  const seen = new Set<number>();
   for (const entry of value) {
     const record = recordOf(entry);
     if (record === null) return null;
     const id = integerInRange(record["id"], -1000, 1000);
-    const lon = finiteNumberOf(record["lon"]);
+    const lon = numberInRange(record["lon"], 0, 360);
     const speed = finiteNumberOf(record["speed"]);
-    if (id === null || lon === null || speed === null) return null;
+    if (id === null || lon === null || lon === 360 || speed === null) return null;
+    if (!EXPECTED_PLANET_IDS.has(id) || seen.has(id)) return null;
+    seen.add(id);
     planets.push({ id, lon, speed });
   }
   return planets;
@@ -324,6 +360,9 @@ function parseBirth(value: unknown): StoredChart["birth"] | null {
   ) {
     return null;
   }
+  // 日の範囲（1〜31）だけでは 2 月 31 日が通ってしまう。暦に無い出生日で誕生日系の占術を回すと、
+  // julianDay が黙って別の日に繰り上げて「別人の結果」が出るので、ここで断る
+  if (!isCalendarDay(year, month, day)) return null;
   return { year, month, day, hour, minute, utc_offset: utcOffset, lat, lng };
 }
 
@@ -338,19 +377,22 @@ export function parseStoredChart(raw: unknown): StoredChart | null {
   const label = record["label"];
   if (typeof label !== "string" || label.length > 60) return null;
 
+  // ハウス方式は受け付けている 4 つのどれか（save_chart の requireHouseSystem と同じ台帳）
   const houseSystem = record["house_system"];
-  if (typeof houseSystem !== "string" || houseSystem.length !== 1) return null;
+  if (typeof houseSystem !== "string" || !HOUSE_SYSTEM_CODES.includes(houseSystem)) return null;
 
+  // 保存時刻は「日付として読める文字列」まで見る（list_charts の並べ替えの鍵でもある）
   const created = record["created"];
   if (typeof created !== "string" || created.length === 0) return null;
+  if (Number.isNaN(Date.parse(created))) return null;
 
   const planets = parsePlanets(record["planets"]);
   if (planets === null) return null;
 
-  // カスプは [0] がダミー＋1..12 でちょうど 13 個、ascmc は [0]=ASC / [1]=MC が要る
-  const cusps = finiteNumberArray(record["cusps"], 13);
-  if (cusps === null || cusps.length !== 13) return null;
-  const ascmc = finiteNumberArray(record["ascmc"], 2);
+  // カスプは [0] がダミー＋1..12 でちょうど 13 個、ascmc は wrapper が返す 8 個ちょうど
+  const cusps = degreeArray(record["cusps"], CUSPS_LENGTH);
+  if (cusps === null) return null;
+  const ascmc = degreeArray(record["ascmc"], ASCMC_LENGTH);
   if (ascmc === null) return null;
 
   const chart: StoredChart = {

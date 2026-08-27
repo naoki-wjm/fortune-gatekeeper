@@ -37,6 +37,7 @@ import {
   REVERSE_BODY_KEYS,
   REVERSE_DEFAULT_UTC_OFFSET,
   REVERSE_MAX_SPAN_YEARS,
+  REVERSE_MAX_SPAN_YEARS_SINGLE,
   REVERSE_MAX_YEAR,
   REVERSE_MIN_YEAR,
   REVERSE_PRIORITIES,
@@ -491,7 +492,13 @@ export const TOOLS = [
       "（条件が成り立つ時刻は time_ranges のほう）。度数は返さない。\n" +
       "年代の範囲は year_from・year_to で（両端を含む）。" +
       `一度に見られるのは ${REVERSE_MAX_SPAN_YEARS} 年ぶんまでで、` +
-      `${REVERSE_MIN_YEAR}〜${REVERSE_MAX_YEAR} 年の内側。\n` +
+      `${REVERSE_MIN_YEAR}〜${REVERSE_MAX_YEAR} 年の内側。` +
+      `**required が 1 本だけのときは ${REVERSE_MAX_SPAN_YEARS_SINGLE} 年ぶんまで**` +
+      "（絞り込みが効かず、いちばん重い形になるため。条件を足せば長く見られる）。\n" +
+      "⚠ **近似探索**なので、留が星座の境のすぐ内側で起きる短い出入り" +
+      "（水星〜火星で 1 時間未満・木星〜冥王星で 4 時間未満）は拾えないことがある" +
+      "（太陽と月は通過の一発計算なのでこの穴は無い）。" +
+      "**候補なし＝必ず該当なし、ではない**——返り値の conventions.limitations にも同じ断りが入る。\n" +
       "⚠ " +
       PRINCIPLE_NO_SUMMING +
       "。",
@@ -542,7 +549,8 @@ export const TOOLS = [
           minimum: REVERSE_MIN_YEAR,
           maximum: REVERSE_MAX_YEAR,
           description:
-            `探す年代の終わり（西暦・この年を含む）。year_from との差は ${REVERSE_MAX_SPAN_YEARS} 年ぶんまで。`,
+            `探す年代の終わり（西暦・この年を含む）。year_from との差は ${REVERSE_MAX_SPAN_YEARS} 年ぶんまで` +
+            `（required が 1 本だけなら ${REVERSE_MAX_SPAN_YEARS_SINGLE} 年ぶんまで）。`,
         },
         utc_offset: {
           type: "number",
@@ -987,13 +995,14 @@ function bodyTooLarge(): Response {
 }
 
 /**
- * POST の本文を JSON-RPC 2.0 の単発リクエストとして読む。
- * 読めなかった場合（大きすぎ・壊れた JSON・バッチ・id 無し・通知）は、そのまま返すべき Response を返す。
- * カード層と占星術層で同じ読み方をするための共通部分。
+ * POST の本文を**大きさを見ながら 1 度だけ**読む。
+ *
+ * 本文は 1 度しか読めないので、入口（src/index.ts）で中身を覗いてから同じ本文を
+ * `handleMcpRequest` に渡せるように、読むところだけを外へ出してある（2026-08-27 査読対応）。
  */
-export async function readJsonRpcRequest(
+export async function readRequestBody(
   request: Request,
-): Promise<{ ok: true; value: JsonRpcRequest } | { ok: false; response: Response }> {
+): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
   // Content-Length で分かるぶんは**本文に触れる前に**断る
   const declaredLength = Number(request.headers.get("Content-Length"));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
@@ -1009,6 +1018,47 @@ export async function readJsonRpcRequest(
   }
   if (bodyByteLength(text) > MAX_BODY_BYTES) {
     return { ok: false, response: bodyTooLarge() };
+  }
+  return { ok: true, text };
+}
+
+/**
+ * 本文が `tools/call` なら、呼ばれているツールの名前。それ以外（壊れた JSON・別のメソッド・
+ * 名前が文字列でない）は null。**入口が本文を覗くためだけ**のもので、判断はここでしない
+ * ―― 名前を返すだけなので、URL や本文の中身がレスポンスやログに出ることはない。
+ */
+export function peekToolName(bodyText: string): string | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const message = payload as JsonRpcMessage;
+  if (message.method !== "tools/call") return null;
+  const name = (message.params as { name?: unknown } | undefined)?.name;
+  return typeof name === "string" ? name : null;
+}
+
+/**
+ * POST の本文を JSON-RPC 2.0 の単発リクエストとして読む。
+ * 読めなかった場合（大きすぎ・壊れた JSON・バッチ・id 無し・通知）は、そのまま返すべき Response を返す。
+ * カード層と占星術層で同じ読み方をするための共通部分。
+ *
+ * `bodyText` を渡すと本文を読み直さない（入口が先に読んで中身を覗いたとき用）。
+ */
+export async function readJsonRpcRequest(
+  request: Request,
+  bodyText?: string,
+): Promise<{ ok: true; value: JsonRpcRequest } | { ok: false; response: Response }> {
+  let text: string;
+  if (bodyText === undefined) {
+    const read = await readRequestBody(request);
+    if (!read.ok) return read;
+    text = read.text;
+  } else {
+    text = bodyText;
   }
 
   let payload: unknown;
@@ -1081,12 +1131,18 @@ export interface CardContext {
   now?: () => Date;
 }
 
-/** POST /mcp の本体 */
+/**
+ * POST /mcp の本体。
+ *
+ * `bodyText` は「入口がもう読んでしまった本文」（src/index.ts が重いツールの見張りのために
+ * 中身を覗く。本文は 1 度しか読めないので読んだものを渡す）。省略すればここで読む。
+ */
 export async function handleMcpRequest(
   request: Request,
   context: CardContext = {},
+  bodyText?: string,
 ): Promise<Response> {
-  const parsed = await readJsonRpcRequest(request);
+  const parsed = await readJsonRpcRequest(request, bodyText);
   if (!parsed.ok) return parsed.response;
   const { id, method } = parsed.value;
 

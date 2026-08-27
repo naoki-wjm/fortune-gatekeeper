@@ -8,6 +8,7 @@
  *
  * ツールを足したら、この表にも 1 行足すまでテストが落ちる（それが狙い）。
  */
+import fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ASTRO_TOOLS, handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
 import { TOOLS as CARD_TOOLS } from "../src/mcp";
@@ -509,5 +510,285 @@ describe("壊れた台帳レコードの言い分", () => {
     expect(json.result.structuredContent.charts).toHaveLength(3);
     expect(json.result.structuredContent).not.toHaveProperty("broken_chart_ids");
     expect(json.result.content[0].text).not.toContain("壊れていて読めない");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 出生の打ち間違いを書き返さない（2026-08-27 査読 I-1）
+// ---------------------------------------------------------------------------
+
+/**
+ * 生年月日を**直接**受け付けるツールと、その birth の経路にある引数。
+ *
+ * `utc_offset` は同じ名前でも意味が科によって違う ―― 宿曜・四柱・九星・save_chart では
+ * **出生の時差**だが、calculate_numerology では「今日」を決めるための時差（対象日の側）。
+ * だからこの表は「schema にあるか」ではなく「birth の経路を通るか」で書いてある。
+ */
+const BIRTH_PATH_FIELDS: Record<string, readonly string[]> = {
+  save_chart: ["year", "month", "day", "hour", "minute", "utc_offset", "lat", "lng"],
+  calculate_numerology: ["year", "month", "day"],
+  shukuyo: ["year", "month", "day", "hour", "minute", "utc_offset"],
+  four_pillars: ["year", "month", "day", "hour", "minute", "utc_offset"],
+  kyusei: ["year", "month", "day", "hour", "minute", "utc_offset"],
+};
+
+/** それ自体は正しい生年月日（ここから 1 つだけ壊して投げる） */
+const BIRTH_PATH_BASE: Record<string, Record<string, unknown>> = {
+  save_chart: {
+    label: "うちまちがい",
+    year: 1975,
+    month: 5,
+    day: 12,
+    hour: 8,
+    minute: 30,
+    utc_offset: 9,
+    lat: 35,
+    lng: 139,
+  },
+  calculate_numerology: { year: 1975, month: 5, day: 12 },
+  shukuyo: { year: 1975, month: 5, day: 12, hour: 8, minute: 30, utc_offset: 9 },
+  four_pillars: { year: 1975, month: 5, day: 12, hour: 8, minute: 30, utc_offset: 9 },
+  kyusei: { year: 1975, month: 5, day: 12, hour: 8, minute: 30, utc_offset: 9 },
+};
+
+/**
+ * 壊し方の表。`tokens` は**返事のどこにも出てはいけない**文字列。
+ *
+ * ⚠ 桁数の少ない値（"5" や "12"）は度数・件数・ハウス番号と当たるので選んでいない。
+ *   代わりに「その断り文が値を書き添えるなら必ず現れる形」＝ 25 / 61 / 1987-02-31 / 92.345 を使う
+ *   （どれも、値を書かない固定文のほうには現れない ―― 受け付ける範囲の上限下限とも重ならない）。
+ */
+const BAD_BIRTH_CASES: {
+  label: string;
+  field: string;
+  patch: Record<string, unknown>;
+  tokens: string[];
+}[] = [
+  {
+    label: "暦に無い日（2 月 31 日）",
+    field: "day",
+    patch: { year: 1987, month: 2, day: 31 },
+    tokens: ["1987", "1987-02-31", "28日"],
+  },
+  { label: "年が小数", field: "year", patch: { year: 1987.5 }, tokens: ["1987"] },
+  { label: "月が 13", field: "month", patch: { month: 13 }, tokens: ["13"] },
+  { label: "日が 32", field: "day", patch: { day: 32 }, tokens: ["32"] },
+  { label: "時が 25", field: "hour", patch: { hour: 25 }, tokens: ["25"] },
+  { label: "分が 61", field: "minute", patch: { minute: 61 }, tokens: ["61"] },
+  {
+    label: "時差が ±14 の外",
+    field: "utc_offset",
+    patch: { utc_offset: 14.75 },
+    tokens: ["14.75"],
+  },
+  { label: "緯度が範囲外", field: "lat", patch: { lat: 92.345 }, tokens: ["92.345"] },
+  { label: "経度が範囲外", field: "lng", patch: { lng: 183.456 }, tokens: ["183.456"] },
+];
+
+/**
+ * ツールの返事（content[*].text・structuredContent・isError）に禁止の文字列が無いか。
+ *
+ * ⚠ JSON-RPC の封筒（`id` など）は見ない ―― 連番の id がたまたま "25" になっただけで
+ *   落ちてしまい、見張りとして役に立たなくなるため。見たいのは**返事の中身**。
+ */
+function assertResultLacks(json: any, tokens: readonly string[], where: string): void {
+  const result = json?.result;
+  expect(result, `${where}: result が返っていません`).toBeDefined();
+  const dumped = JSON.stringify(result);
+  for (const token of tokens) {
+    if (dumped.includes(token)) {
+      expect.fail(`${where}: 返事に「${token}」が出ました …${excerpt(dumped, token)}…`);
+    }
+  }
+}
+
+describe("出生の打ち間違いを返事に書き返さない", () => {
+  for (const [name, fields] of Object.entries(BIRTH_PATH_FIELDS)) {
+    it(`${name}（出生の引数を 1 つずつ壊す）`, async () => {
+      for (const badCase of BAD_BIRTH_CASES) {
+        if (!fields.includes(badCase.field)) continue;
+        const bench = makeBench();
+        const args = { ...BIRTH_PATH_BASE[name], ...badCase.patch };
+        const json = await callTool(name, args, bench.context);
+        const where = `${name} / ${badCase.label}`;
+
+        expect(json?.result?.isError, `${where}: 断られていません`).toBe(true);
+        assertResultLacks(json, badCase.tokens, where);
+        assertNoLeak(json, where);
+      }
+    });
+  }
+
+  it("断り文には「値は返事に出しません」と書いてある（黙って消さない）", async () => {
+    const bench = makeBench();
+    const badDay = await callTool(
+      "shukuyo",
+      { ...BIRTH_PATH_BASE["shukuyo"], month: 2, day: 31 },
+      bench.context,
+    );
+    expect(badDay.result.content[0].text).toContain("出生の年月日が暦に存在しない組み合わせです");
+    expect(badDay.result.content[0].text).toContain("値は返事に出しません");
+
+    const badHour = await callTool(
+      "shukuyo",
+      { ...BIRTH_PATH_BASE["shukuyo"], hour: 25 },
+      bench.context,
+    );
+    expect(badHour.result.content[0].text).toContain("hour は 0 以上 23 以下");
+    expect(badHour.result.content[0].text).toContain("値は返事に出しません");
+  });
+
+  it("対象日の側は今までどおり値を出す（直しようが無くなるので隠さない）", async () => {
+    const bench = makeBench();
+    const badDate = await callTool(
+      "shukuyo",
+      { chart_id: CHART_A, date: "2026-02-30" },
+      bench.context,
+    );
+    expect(badDate.result.isError).toBe(true);
+    expect(badDate.result.content[0].text).toContain("2026-02-30 は暦に存在しない日付です");
+  });
+
+  /**
+   * 「birth の受付を使っている科が、上の表から抜けていないか」をソースで見張る。
+   * 新しい誕生日系の科を足したとき、canary の表に 1 行足すまで落ちる（それが狙い）。
+   */
+  it("birth の受付を使っている科は全部この表にある（新しい科はここで落ちる）", () => {
+    /** ソースを 1 枚読む（リポジトリ相対）。@types/node は入れない方針なので readFileSync だけで済ませる */
+    const readSource = (relative: string): string =>
+      new TextDecoder().decode(fs.readFileSync(new URL(`../${relative}`, import.meta.url)));
+
+    // 科の一覧は入口（配線板）から採る ―― tools/*.ts を集めているのはここ 1 枚だけ、が約束
+    const entrance = readSource("src/astro/astro-mcp.ts");
+    const toolFiles = [...entrance.matchAll(/from "\.\/tools\/([\w-]+)"/g)].map(
+      (hit) => `${hit[1] as string}.ts`,
+    );
+    expect(toolFiles.length, "入口から tools/*.ts を 1 枚も拾えていません").toBeGreaterThan(5);
+
+    /** 出生の引数を受けている印（どれか 1 つでもあれば birth の経路を持つ） */
+    const MARKERS = [
+      "resolveBirthMoment",
+      "assertBirthCalendarDay",
+      "requireBirthInteger",
+      "optionalBirthInteger",
+      "requireBirthNumber",
+      "optionalBirthNumber",
+    ];
+
+    const covered = new Set<string>();
+    for (const file of toolFiles) {
+      const source = readSource(`src/astro/tools/${file}`);
+      if (!MARKERS.some((marker) => source.includes(marker))) continue;
+
+      const names = [...source.matchAll(/^ {4}name: "(\w+)",$/gm)].map((hit) => hit[1] as string);
+      const listed = names.filter((toolName) => toolName in BIRTH_PATH_FIELDS);
+      if (listed.length === 0) {
+        expect.fail(
+          `${file} は出生の引数を受けているのに、canary の表（BIRTH_PATH_FIELDS）に 1 本もありません` +
+            `（この科のツール: ${names.join(", ") || "なし"}）`,
+        );
+      }
+      for (const toolName of listed) covered.add(toolName);
+    }
+
+    const stale = Object.keys(BIRTH_PATH_FIELDS).filter((toolName) => !covered.has(toolName));
+    expect(stale, `表に残っているのに出生の引数を受けていない科: ${stale.join(", ")}`).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 台帳に混ぜた「余分な要素」も表に出ない（2026-08-27 査読 I-2）
+// ---------------------------------------------------------------------------
+
+/** 既知の配列に紛れ込ませる数値。度数と紛れないよう小数第 4 位まで書いてある */
+const ARRAY_CANARIES = {
+  planet: 111.2223,
+  ascmc: 222.3334,
+  cusp: 333.4445,
+} as const;
+
+/** 台帳のレコードを 1 か所だけ壊す（canary の数値を既知の配列に紛れ込ませる） */
+const TAMPERINGS: {
+  label: string;
+  tamper: (record: Record<string, unknown>) => void;
+  token: string;
+}[] = [
+  {
+    label: "planets に 12 個目（未知 ID）",
+    tamper: (record) => {
+      (record["planets"] as unknown[]).push({ id: 12, lon: ARRAY_CANARIES.planet, speed: 1 });
+    },
+    token: String(ARRAY_CANARIES.planet),
+  },
+  {
+    label: "planets に 12 個目（既知 ID の重複）",
+    tamper: (record) => {
+      (record["planets"] as unknown[]).push({ id: 0, lon: ARRAY_CANARIES.planet, speed: 1 });
+    },
+    token: String(ARRAY_CANARIES.planet),
+  },
+  {
+    label: "ascmc に 9 個目",
+    tamper: (record) => {
+      (record["ascmc"] as unknown[]).push(ARRAY_CANARIES.ascmc);
+    },
+    token: String(ARRAY_CANARIES.ascmc),
+  },
+  {
+    label: "cusps が 14 個",
+    tamper: (record) => {
+      (record["cusps"] as unknown[]).push(ARRAY_CANARIES.cusp);
+    },
+    token: String(ARRAY_CANARIES.cusp),
+  },
+  {
+    label: "cusps が 12 個（足りないうえ 1 本が canary）",
+    tamper: (record) => {
+      const cusps = (record["cusps"] as number[]).slice(0, 12);
+      cusps[5] = ARRAY_CANARIES.cusp;
+      record["cusps"] = cusps;
+    },
+    token: String(ARRAY_CANARIES.cusp),
+  },
+];
+
+describe("既知の配列に紛れ込ませた数値は表に出ない", () => {
+  for (const tampering of TAMPERINGS) {
+    it(`${tampering.label} → get_chart / transit / list_charts のどれにも出ない`, async () => {
+      for (const tool of ["get_chart", "transit", "list_charts"]) {
+        const bench = makeBench();
+        const record = storedRecord(CHART_A, "いじった図");
+        tampering.tamper(record);
+        bench.kv.store.set(`chart:${OWNER.user}:${CHART_A}`, JSON.stringify(record));
+
+        const args = tool === "list_charts" ? {} : { chart_id: CHART_A };
+        const json = await callTool(tool, args, bench.context);
+        const where = `${tool} / ${tampering.label}`;
+
+        assertResultLacks(json, [tampering.token], where);
+        assertNoLeak(json, where);
+      }
+    });
+  }
+
+  it("いじった 1 枚は壊れ扱いになる（素通りしていない＝見張りが空撃ちでない）", async () => {
+    for (const tampering of TAMPERINGS) {
+      const bench = makeBench();
+      const record = storedRecord(CHART_A, "いじった図");
+      tampering.tamper(record);
+      const raw = JSON.stringify(record);
+      // 打ち間違いの見張り ―― 探している canary が、そもそも台帳に入っていること
+      expect(raw, `${tampering.label}: canary が台帳に無い`).toContain(tampering.token);
+      bench.kv.store.set(`chart:${OWNER.user}:${CHART_A}`, raw);
+
+      const json = await callTool("get_chart", { chart_id: CHART_A }, bench.context);
+      expect(json.result.isError, tampering.label).toBe(true);
+      expect(json.result.content[0].text, tampering.label).toContain(
+        "台帳レコードが壊れていて読めません",
+      );
+
+      const listed = await callTool("list_charts", {}, bench.context);
+      expect(listed.result.structuredContent.broken_chart_ids, tampering.label).toContain(CHART_A);
+    }
   });
 });

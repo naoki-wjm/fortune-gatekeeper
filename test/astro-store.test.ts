@@ -7,7 +7,7 @@
  * 直したいバグの代わりに**本物のレコードを壊れ扱いにする**事故が起きうるため。
  */
 import { describe, expect, it } from "vitest";
-import { AstroError } from "../src/astro/chart";
+import { AstroError, PLANETS } from "../src/astro/chart";
 import {
   getChart,
   listCharts,
@@ -19,15 +19,31 @@ import { FakeKv } from "./stubs/fake-kv";
 
 const USER = "user1";
 
+/**
+ * save_chart が書く天体の並び（chart.ts の PLANETS ＝ 11 天体をそのまま）。
+ * **件数と ID の集合がちょうど一致**していないと通らないので、ここは台帳から作る。
+ */
+function validPlanets(): StoredChart["planets"] {
+  return PLANETS.map((planet, index) => ({
+    id: planet.id,
+    lon: (index * 30 + 12.5) % 360,
+    speed: 1,
+  }));
+}
+
+/** 11 天体のうち 1 つだけ差し替える（「その 1 つが壊れている」を作る） */
+function planetsWith(patch: Record<string, unknown>, at = 0): unknown {
+  const planets: unknown[] = validPlanets();
+  planets[at] = { ...(planets[at] as Record<string, unknown>), ...patch };
+  return planets;
+}
+
 /** 素直に通るはずの 1 枚（save_chart が書く形そのまま） */
 function validChart(overrides: Partial<StoredChart> = {}): StoredChart {
   return {
     label: "サンプル",
     house_system: "P",
-    planets: [
-      { id: 0, lon: 12.5, speed: 1 },
-      { id: 1, lon: 300, speed: 13.2 },
-    ],
+    planets: validPlanets(),
     cusps: [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 359.9],
     ascmc: [30, 300, 0, 0, 0, 0, 0, 0],
     birth: {
@@ -100,11 +116,11 @@ describe("parseStoredChart（通す側）", () => {
     const withExtraPlanet = parseStoredChart(
       roundTrip({
         ...validChart(),
-        planets: [{ id: 0, lon: 1, speed: 1, lat: 51.4779, canary: "CANARY_PLANET" }],
+        planets: planetsWith({ lat: 51.4779, canary: "CANARY_PLANET" }),
       }),
     );
     expect(JSON.stringify(withExtraPlanet)).not.toContain("CANARY_PLANET");
-    expect(withExtraPlanet?.planets[0]).toEqual({ id: 0, lon: 1, speed: 1 });
+    expect(withExtraPlanet?.planets[0]).toEqual({ id: 0, lon: 12.5, speed: 1 });
   });
 });
 
@@ -124,19 +140,57 @@ describe("parseStoredChart（断る側）", () => {
     ["created が数値", validChart({ created: 20260820 as unknown as string })],
     ["planets が空", validChart({ planets: [] })],
     ["planets が配列でない", validChart({ planets: {} as unknown as StoredChart["planets"] })],
-    ["planets の id が小数", validChart({ planets: [{ id: 0.5, lon: 1, speed: 1 }] })],
-    ["planets の lon が文字列", validChart({ planets: [{ id: 0, lon: "12" as unknown as number, speed: 1 }] })],
-    ["planets の lon が NaN", validChart({ planets: [{ id: 0, lon: NaN, speed: 1 }] })],
-    ["planets の speed が Infinity", validChart({ planets: [{ id: 0, lon: 1, speed: Infinity }] })],
-    ["planets の speed が無い", validChart({ planets: [{ id: 0, lon: 1 } as unknown as StoredChart["planets"][0]] })],
+    ["planets が 1 天体だけ", validChart({ planets: [{ id: 0, lon: 1, speed: 1 }] })],
+    ["planets が 10 天体（Nノードが欠けている）", validChart({ planets: validPlanets().slice(0, 10) })],
+    [
+      "planets に 12 個目（未知 ID）が混ざる",
+      validChart({ planets: [...validPlanets(), { id: 12, lon: 123.4567, speed: 1 }] }),
+    ],
+    [
+      "planets に 12 個目（既知 ID の重複）が混ざる",
+      validChart({ planets: [...validPlanets(), { id: 0, lon: 123.4567, speed: 1 }] }),
+    ],
+    [
+      "planets の件数は合っているが同じ ID が 2 つ",
+      validChart({ planets: planetsWith({ id: 1 }) as StoredChart["planets"] }),
+    ],
+    [
+      "planets に未知 ID が混ざる（件数は合っている）",
+      validChart({ planets: planetsWith({ id: 10 }) as StoredChart["planets"] }),
+    ],
+    ["planets の id が小数", validChart({ planets: planetsWith({ id: 0.5 }) as StoredChart["planets"] })],
+    ["planets の lon が文字列", validChart({ planets: planetsWith({ lon: "12" }) as StoredChart["planets"] })],
+    ["planets の lon が NaN", validChart({ planets: planetsWith({ lon: NaN }) as StoredChart["planets"] })],
+    ["planets の lon が 360", validChart({ planets: planetsWith({ lon: 360 }) as StoredChart["planets"] })],
+    ["planets の lon が負", validChart({ planets: planetsWith({ lon: -0.5 }) as StoredChart["planets"] })],
+    ["planets の speed が Infinity", validChart({ planets: planetsWith({ speed: Infinity }) as StoredChart["planets"] })],
+    [
+      "planets の speed が無い",
+      validChart({
+        planets: validPlanets().map((planet, index) =>
+          index === 0 ? ({ id: planet.id, lon: planet.lon } as StoredChart["planets"][0]) : planet,
+        ),
+      }),
+    ],
     ["cusps が無い", (() => { const c: any = validChart(); delete c.cusps; return c; })()],
     ["cusps が 12 個", validChart({ cusps: [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330] })],
     ["cusps が 14 個", validChart({ cusps: [...validChart().cusps, 0] })],
     ["cusps に null が混ざる", validChart({ cusps: [null as unknown as number, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 0] })],
     ["cusps に文字列の数値が混ざる", validChart({ cusps: ["0" as unknown as number, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 0] })],
+    ["cusps に 360 が混ざる", validChart({ cusps: [360, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 0] })],
+    ["cusps に負の角度が混ざる", validChart({ cusps: [0, -30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 0] })],
     ["ascmc が無い", (() => { const c: any = validChart(); delete c.ascmc; return c; })()],
     ["ascmc が 1 個", validChart({ ascmc: [30] })],
-    ["ascmc が NaN 入り", validChart({ ascmc: [30, NaN] })],
+    ["ascmc が 2 個", validChart({ ascmc: [30, 300] })],
+    ["ascmc が 7 個", validChart({ ascmc: [30, 300, 0, 0, 0, 0, 0] })],
+    ["ascmc に 9 個目（余分な数値）が混ざる", validChart({ ascmc: [30, 300, 0, 0, 0, 0, 0, 0, 123.4567] })],
+    ["ascmc が NaN 入り", validChart({ ascmc: [30, NaN, 0, 0, 0, 0, 0, 0] })],
+    ["ascmc に 360 以上が混ざる", validChart({ ascmc: [30, 360.5, 0, 0, 0, 0, 0, 0] })],
+    ["house_system が台帳に無い記号", validChart({ house_system: "X" })],
+    ["created が日付として読めない", validChart({ created: "きのう" })],
+    ["birth が 2 月 31 日（暦に無い日）", validChart({ birth: { ...validChart().birth!, month: 2, day: 31 } })],
+    ["birth が 4 月 31 日（暦に無い日）", validChart({ birth: { ...validChart().birth!, month: 4, day: 31 } })],
+    ["birth が平年の 2 月 29 日", validChart({ birth: { ...validChart().birth!, year: 1991, month: 2, day: 29 } })],
     ["default_location が null", validChart({ default_location: null as unknown as undefined })],
     ["default_location の lng が範囲外", validChart({ default_location: { lat: 35, lng: 200 } })],
     ["default_location の lat が文字列", validChart({ default_location: { lat: "35" as unknown as number, lng: 139 } })],

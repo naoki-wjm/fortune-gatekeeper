@@ -7,7 +7,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
-import { mcToArmc } from "../src/astro/chart";
+import { PLANETS, mcToArmc } from "../src/astro/chart";
 import type { AuthContext, StoredChart } from "../src/astro/store";
 import { FakeKv } from "./stubs/fake-kv";
 import {
@@ -122,15 +122,17 @@ async function saveTwo(overridesB: Record<string, unknown> = {}): Promise<[strin
 
 /**
  * 出生データを預かっていない古い登録を台帳へ直接置く（簡易方式に落ちる図）。
- * 10 天体はそろえておく ―― 欠けていると「登録し直してください」で止まってしまうため。
+ *
+ * 天体は chart.ts の PLANETS をそのまま並べる ―― 台帳の読み出しが件数と ID の集合を
+ * 見るようになったので（2026-08-27 査読 I-2）、欠けた並びは**壊れたレコード**として断られる。
  */
 function putBirthlessChart(chartId = "oldchart", offset = 6, user = "user1"): string {
   const stored: StoredChart = {
     label: "むかしの登録",
     house_system: "P",
-    planets: Array.from({ length: 10 }, (_unused, id) => ({
-      id,
-      lon: (id * 30 + offset) % 360,
+    planets: PLANETS.map((planet, index) => ({
+      id: planet.id,
+      lon: (index * 30 + offset) % 360,
       speed: 1,
     })),
     cusps: [...FAKE_CUSPS],
@@ -344,7 +346,7 @@ describe("composite（簡易方式＝出生データを預かっていない登�
     expect(result.structuredContent.conventions.asc).toBe("asc_midpoint_equal_houses");
   });
 
-  it("天体が足りない古い登録は「登録し直してください」で断る", async () => {
+  it("天体が足りない古い登録は台帳の読み出しで断る（登録し直しの案内）", async () => {
     const idA = await saveChart({ label: "わたし" });
     const stored: StoredChart = {
       label: "壊れた登録",
@@ -356,9 +358,15 @@ describe("composite（簡易方式＝出生データを預かっていない登�
     };
     kv.store.set("chart:user1:brokenone", JSON.stringify(stored));
 
+    // 2026-08-27 の査読 I-2 以降、天体の欠けたレコードは**台帳の読み出し**で断られる
+    // （composite の midpointPositions にある同じ趣旨の門番は、そこまで届かない控えになった）。
+    // 断り文に書いてよいのは chart_id だけなので、ラベルは出ない。
     const result = await call("composite", { a: idA, b: "brokenone" });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("save_chart で登録し直す");
+    expect(result.content[0].text).toContain("brokenone");
+    expect(result.content[0].text).toContain("台帳レコードが壊れていて読めません");
+    expect(result.content[0].text).toContain("save_chart で登録し直してください");
+    expect(result.content[0].text).not.toContain("壊れた登録");
   });
 });
 

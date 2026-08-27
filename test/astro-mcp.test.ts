@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
-import { normalizeDegree } from "../src/astro/chart";
+import { PLANETS, normalizeDegree } from "../src/astro/chart";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
 import {
   createChart,
   newChartId,
+  parseStoredChart,
   type AuthContext,
   type StoredChart,
 } from "../src/astro/store";
@@ -20,6 +21,15 @@ import {
   makeFakeEngine,
   type FakeEngine,
 } from "./stubs/fake-engine";
+
+/**
+ * 台帳へ直に置くチャートの天体（chart.ts の PLANETS ＝ 11 天体）。
+ * `parseStoredChart` は件数と ID の集合がちょうど一致することを見るので、
+ * 手書きの「1 天体だけ」のレコードはもう通らない（2026-08-27 査読 I-2）。
+ */
+function storedPlanets(): { id: number; lon: number; speed: number }[] {
+  return PLANETS.map((planet, index) => ({ id: planet.id, lon: (index * 30) % 360, speed: 1 }));
+}
 
 const OWNER: AuthContext = { user: "user1", name: "オーナー", role: "owner" };
 
@@ -114,7 +124,7 @@ function putLegacyChart(chartId = "legacy01", user = "user1"): string {
   const legacy: StoredChart = {
     label: "むかしの図",
     house_system: "P",
-    planets: [{ id: 0, lon: 0, speed: 1 }],
+    planets: storedPlanets(),
     cusps: [...FAKE_CUSPS],
     ascmc: [...FAKE_ASCMC],
     created: "2026-08-01T00:00:00.000Z",
@@ -471,6 +481,33 @@ describe("save_chart", () => {
     const result = await call("save_chart", BIRTH, broken);
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("天体計算エンジンを初期化できませんでした");
+  });
+
+  /**
+   * 保存形式の**正本は save_chart が書く形**なので、読み出しの検算を厳しくしたときに
+   * まず確かめるのはここ ―― 書いたばかりのレコードが `parseStoredChart` を素通りすること。
+   * （本番の台帳に入っている図も、同じ道を通って書かれたもの。2026-08-27 査読 I-2）
+   */
+  it("書いたレコードはそのまま読み出しの検算を通る（round-trip）", async () => {
+    for (const args of [
+      BIRTH,
+      { ...BIRTH, house_system: "W" },
+      { ...BIRTH, default_lat: 34.6937, default_lng: 135.5023, default_location_label: "大阪" },
+    ]) {
+      const saved = await call("save_chart", args);
+      expect(saved.isError, JSON.stringify(args)).toBeUndefined();
+      const chartId: string = saved.structuredContent.chart_id;
+
+      const raw = kv.store.get(`chart:${OWNER.user}:${chartId}`);
+      expect(raw, `${chartId} が台帳に無い`).toBeDefined();
+      const parsed = parseStoredChart(JSON.parse(raw as string));
+      expect(parsed, `${chartId} が壊れ扱いになった`).not.toBeNull();
+      // 写し直したものが、書いたものと 1 バイトも変わらない（落とすべき余りものが無い）
+      expect(parsed).toEqual(JSON.parse(raw as string));
+
+      const reread = await call("get_chart", { chart_id: chartId });
+      expect(reread.isError).toBeUndefined();
+    }
   });
 });
 
@@ -1799,10 +1836,12 @@ describe("calculate_numerology", () => {
     }
   });
 
-  it("直接指定でも暦に無い生年月日は断る", async () => {
+  it("直接指定でも暦に無い生年月日は断る（断り文に値は出さない）", async () => {
     const result = await call("calculate_numerology", { year: 1986, month: 2, day: 31 });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("1986-02-31 は暦に存在しない日付です");
+    expect(result.content[0].text).toContain("出生の年月日が暦に存在しない組み合わせです");
+    // 打ち間違いの生年月日も出生日の候補には違いないので、値は書き返さない（査読 I-1）
+    expect(result.content[0].text).not.toContain("1986");
   });
 });
 
@@ -2211,7 +2250,8 @@ describe("shukuyo", () => {
       minute: 0,
     });
     expect(badBirth.isError).toBe(true);
-    expect(badBirth.content[0].text).toContain("2023-02-31 は暦に存在しない日付です");
+    expect(badBirth.content[0].text).toContain("出生の年月日が暦に存在しない組み合わせです");
+    expect(badBirth.content[0].text).not.toContain("2023");
 
     const badDate = await call("shukuyo", { chart_id: chartId, date: "2026-02-30" });
     expect(badDate.isError).toBe(true);
@@ -2898,7 +2938,8 @@ describe("four_pillars", () => {
       minute: 0,
     });
     expect(badBirth.isError).toBe(true);
-    expect(badBirth.content[0].text).toContain("2022-02-31 は暦に存在しない日付です");
+    expect(badBirth.content[0].text).toContain("出生の年月日が暦に存在しない組み合わせです");
+    expect(badBirth.content[0].text).not.toContain("2022");
 
     const badDate = await call("four_pillars", { chart_id: chartId, date: "2026-02-30" });
     expect(badDate.isError).toBe(true);
@@ -3466,14 +3507,21 @@ describe("natal_moon_calendar", () => {
 
     const result = await call("natal_moon_calendar", { chart_id: chartId, ...ARGS });
     expect(result.isError).toBeUndefined();
-    // 古い登録に入っているのは太陽だけ＝相手は 太陽・ASC・MC の 3 点、個人朔望も太陽ぶんだけ
-    const targets = new Set(
+    // birth が無くても座標はそろっている＝相手は 10 天体＋ASC/MC（ノードは入れない）
+    const targets: Set<string> = new Set(
       result.structuredContent.natal_aspects.map((entry: any) => entry.target),
     );
-    expect([...targets].sort()).toEqual(["ASC", "MC", "太陽"]);
+    const allowed = new Set([
+      ...PLANETS.filter((planet) => planet.id !== 11).map((planet) => planet.name),
+      "ASC",
+      "MC",
+    ]);
+    expect(targets.size).toBeGreaterThan(0);
+    for (const target of targets) expect(allowed.has(target), target).toBe(true);
+    expect(targets.has("Nノード")).toBe(false);
     expect(
       result.structuredContent.personal_phases.every(
-        (entry: any) => entry.relative_to === "natal_sun",
+        (entry: any) => entry.relative_to === "natal_sun" || entry.relative_to === "natal_moon",
       ),
     ).toBe(true);
   });
@@ -3547,9 +3595,10 @@ describe("実在しない暦日", () => {
     for (const date of INVALID) {
       const ng = await call("save_chart", { ...BIRTH, ...date });
       expect(ng.isError).toBe(true);
-      expect(ng.content[0].text).toContain("は暦に存在しない日付です");
-      // 利用者が渡した値なので、どの日付が駄目だったかは言ってよい
-      expect(ng.content[0].text).toContain(String(date.year));
+      expect(ng.content[0].text).toContain("出生の年月日が暦に存在しない組み合わせです");
+      // 出生の年月日なので、**どの日付が駄目だったかは言わない**（2026-08-27 査読 I-1）
+      expect(ng.content[0].text).not.toContain(String(date.year));
+      expect(ng.content[0].text).not.toContain(String(date.day));
     }
   });
 
@@ -3687,7 +3736,7 @@ describe("chart_id の衝突回避", () => {
   const SAMPLE: StoredChart = {
     label: "衝突テスト",
     house_system: "P",
-    planets: [{ id: 0, lon: 0, speed: 1 }],
+    planets: storedPlanets(),
     cusps: [...FAKE_CUSPS],
     ascmc: [...FAKE_ASCMC],
     created: "2026-08-22T00:00:00.000Z",

@@ -10,6 +10,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
+import { PLANETS } from "../src/astro/chart";
 import type { AuthContext, StoredChart } from "../src/astro/store";
 import { calculateFourPillars, orderedPillars } from "../src/four-pillars";
 import { sunLongitude, type NakkoMoment } from "../src/nakko";
@@ -145,13 +146,22 @@ function expectedBoard(count: number) {
 }
 
 /**
+ * 台帳へ直に置くチャートの天体（chart.ts の PLANETS ＝ 11 天体）。
+ * `parseStoredChart` は件数と ID の集合がちょうど一致することを見るので、
+ * 手書きの「1 天体だけ」のレコードはもう通らない（2026-08-27 査読 I-2）。
+ */
+function storedPlanets(): { id: number; lon: number; speed: number }[] {
+  return PLANETS.map((planet, index) => ({ id: planet.id, lon: (index * 30) % 360, speed: 1 }));
+}
+
+/**
  * 出生データを預からなかった時代の登録を台帳へ直接置く（命式が立たない図）。
  */
 function putLegacyChart(chartId = "legacy01", user = "user1"): string {
   const legacy: StoredChart = {
     label: "むかしの図",
     house_system: "P",
-    planets: [{ id: 0, lon: 0, speed: 1 }],
+    planets: storedPlanets(),
     cusps: [...FAKE_CUSPS],
     ascmc: [...FAKE_ASCMC],
     created: "2026-08-01T00:00:00.000Z",

@@ -13,12 +13,13 @@ import {
   type NumerologyResult,
 } from "../../numerology";
 import { AstroError } from "../chart";
-import { assertCalendarDay } from "../calendar";
+import { assertBirthCalendarDay, assertCalendarDay } from "../calendar";
 import { type AstroContext, type AstroTool } from "../context";
 import { MISSING_BIRTH_MESSAGE, missingChartMessage } from "../../phrases";
 import { getChart } from "../store";
 import {
   argsOf,
+  optionalBirthInteger,
   optionalInteger,
   optionalNumber,
   optionalString,
@@ -45,8 +46,9 @@ interface NumerologyBirth {
  * 生年月日をどこから取るかを決める。
  *
  * **chart_id か year / month / day のどちらか一方**で、両方来たら断る（どちらを見るか勝手に決めない）。
- * 直接指定のときだけ暦の検算をここでする ―― 呼び出した側が打った値なので日付を出して断ってよい。
- * 預かっているぶんは登録時に検算済みで、こちらは値を返事に出さない約束がある。
+ * 直接指定のときだけ暦の検算をここでする（預かっているぶんは登録時に検算済み）。
+ * ⚠ 断り文に**日付は出さない** ―― 呼び出した側が打った値であっても、打ち間違いの年月日は
+ *    出生日の候補には違いないので、返事にも会話ログにも残さない（2026-08-27 査読 I-1）。
  *
  * 見つからない・出生データが無いといった「断り」は toolError をそのまま包んで返す
  * （呼び出し側で `"error" in …` を見て素通しする）。
@@ -56,9 +58,10 @@ async function resolveNumerologyBirth(
   context: AstroContext,
 ): Promise<NumerologyBirth | { error: ToolResult }> {
   const chartId = optionalString(args, "chart_id", 32);
-  const year = optionalInteger(args, "year", 1, 9999);
-  const month = optionalInteger(args, "month", 1, 12);
-  const day = optionalInteger(args, "day", 1, 31);
+  // 生年月日の 3 つは「断り文に値を書かない」ほうで受ける（target_* は対象日なので今までどおり）
+  const year = optionalBirthInteger(args, "year", 1, 9999);
+  const month = optionalBirthInteger(args, "month", 1, 12);
+  const day = optionalBirthInteger(args, "day", 1, 31);
   const givenBirth = [year, month, day].filter((value) => value !== undefined).length;
 
   if (chartId !== undefined && givenBirth > 0) {
@@ -80,7 +83,7 @@ async function resolveNumerologyBirth(
         "生年月日は year / month / day の 3 つをそろえて指定してください",
       );
     }
-    assertCalendarDay(year as number, month as number, day as number);
+    assertBirthCalendarDay(year as number, month as number, day as number);
     return {
       year: year as number,
       month: month as number,

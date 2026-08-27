@@ -216,6 +216,10 @@ async function redirectToAccess(
  * ＝ `name` で見分ける。`redirectUri` を持つ（＝クライアントと redirect_uri の照合が済んだ）ものだけ
  * エラーリダイレクト、それ以外は手元で 400。説明文はライブラリの定型文なのでそのまま添える。
  * 2026-08-27 の 0.10.3 更新で足した手入れ（これが無いと拒否が 500 で返る。手本も未対応）。
+ *
+ * `redirectUri` は **http / https の URL として読めたときだけ**リダイレクトに使う（2026-08-27 再査読対応）。
+ * 読めない文字列だと `new URL()` がそこで投げて 500 になり、`javascript:` のような別の仕組みの
+ * URL はそもそもリダイレクト先にしてはいけない ―― どちらも手元で 400 に倒す。
  */
 function authorizationRefusal(error: unknown): Response | null {
 	if (!(error instanceof Error) || error.name !== "AuthorizationError") {
@@ -229,8 +233,8 @@ function authorizationRefusal(error: unknown): Response | null {
 		issuer?: string;
 	};
 	const errorCode = code || "invalid_request";
-	if (redirectUri) {
-		const url = new URL(redirectUri);
+	const url = httpUrlOrNull(redirectUri);
+	if (url) {
 		url.searchParams.set("error", errorCode);
 		if (description) url.searchParams.set("error_description", description);
 		if (state) url.searchParams.set("state", state);
@@ -240,6 +244,18 @@ function authorizationRefusal(error: unknown): Response | null {
 	return new Response(`Invalid request: ${errorCode}${description ? ` (${description})` : ""}`, {
 		status: 400,
 	});
+}
+
+/** http / https の URL として読めれば URL、読めなければ（別のスキームでも）null */
+function httpUrlOrNull(raw: string | undefined): URL | null {
+	if (!raw) return null;
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return null;
+	}
+	return url.protocol === "http:" || url.protocol === "https:" ? url : null;
 }
 
 /**

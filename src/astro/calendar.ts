@@ -38,8 +38,9 @@ export function isCalendarDay(year: number, month: number, day: number): boolean
  *
  * 日の範囲（1〜31）だけでは 2026-02-31 が通ってしまい、`swe_julday` はそれを黙って
  * 3 月 3 日に繰り上げる ―― 打ち間違いが「別の日の図」として静かに返ってくるのが困る。
- * ⚠ 呼ぶ相手を選ぶこと: **利用者が渡した引数**にだけ使う（メッセージに日付が出る）。
- *    台帳に預かっている出生データには使わない（値を出さない言い方で断る）。
+ * ⚠ 呼ぶ相手を選ぶこと: **検索の対象日**にだけ使う（メッセージに日付が出る）。
+ *    出生の年月日には使わない ―― 利用者が渡した引数であっても、値を出さない
+ *    `assertBirthCalendarDay` のほうを使う（2026-08-27 査読 I-1）。
  */
 export function assertCalendarDay(year: number, month: number, day: number): void {
   if (isCalendarDay(year, month, day)) return;
@@ -47,6 +48,30 @@ export function assertCalendarDay(year: number, month: number, day: number): voi
     `${year}-${pad(month)}-${pad(day)} は暦に存在しない日付です` +
       `（${year}年${month}月は${daysInMonth(year, month)}日まで）`,
   );
+}
+
+/**
+ * 出生の年月日の実在検算の断り文（**値を含まない固定文**）。
+ *
+ * 出生データは「返事（テキスト・structuredContent・**エラー文**）に出さない」が鯖の約束なので、
+ * 打ち間違いをそのまま書き返すと、その 1 行で原本が会話ログに残ってしまう
+ * ―― 打ち間違いの日付も出生日の候補には違いない。
+ */
+export const BIRTH_CALENDAR_DAY_MESSAGE =
+  "出生の年月日が暦に存在しない組み合わせです（月は 1〜12、日はその月の日数まで）。" +
+  "値は返事に出しませんので、渡した年月日を手元で確かめてください";
+
+/**
+ * 実在しない**出生の**暦日を弾く（`assertCalendarDay` の値を出さない版）。
+ *
+ * 見ているものは `assertCalendarDay` と同じで、違うのは断り文だけ。
+ * 検索の対象日（transit の year/month/day、`date`、moon_calendar の start）は
+ * 出生データではないので、そちらは今までどおり値を出すほうを使う
+ * ―― どの日を見に行ったのかが分からないと、打ち間違いの直しようがないため。
+ */
+export function assertBirthCalendarDay(year: number, month: number, day: number): void {
+  if (isCalendarDay(year, month, day)) return;
+  throw new AstroError(BIRTH_CALENDAR_DAY_MESSAGE);
 }
 
 /** UTC の Date を「2026-08-20 02:15 UTC」に */

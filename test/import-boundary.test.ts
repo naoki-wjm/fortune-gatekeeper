@@ -21,8 +21,10 @@
  * もう 1 本は AGENTS.md の「tools 同士は import しない」の固定。科どうしが横に
  * つながり始めると、入口の 1 行を読むだけでは何が載っているか分からなくなるためです。
  *
- * ⚠ 読むのはソースの文字列だけ（実行はしない）。動的 import（`import(...)`）は追わないので、
- *   境界をまたぐ配線を動的 import で書くと、このテストはすり抜けます。
+ * ⚠ 読むのはソースの文字列だけ（実行はしない）。動的 import（`import(...)`）は追えないので、
+ *   境界をまたぐ配線を動的 import で書かれるとこの依存グラフはすり抜けられます。
+ *   そこで **公開層から届く自作ファイルでは動的 import 自体を禁じる**という形で穴を塞いであります
+ *   （3 本目のテスト。2026-08-27 再査読対応）。
  */
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
@@ -204,6 +206,39 @@ describe("公開層の import 境界", () => {
     for (const expected of EXPECTED_FILES) {
       expect(Array.from(reached), `${expected} が依存グラフに見当たらない`).toContain(expected);
     }
+  });
+
+  /**
+   * 依存グラフは静的な import しか見ていないので、動的 import（`import(...)`）で書かれた配線は
+   * 上のテストをすり抜ける。読む側が追えない書き方そのものを禁じて、穴を閉じておく
+   * （2026-08-27 再査読対応 Minor-1）。
+   *
+   * 見るのは**自作の .ts だけ**。`src/astro/sweph/` は npm の無改造複製（minify 済みで、
+   * 中に動的 import が入っている）なので、この約束の外に置く ―― あそこに手は入れない、が別の約束。
+   * コメントの中の `import(` も区別せずに落とす（1 か所も無いのが正しい状態）。
+   */
+  it("公開層から届く自作ファイルは動的 import を使わない", () => {
+    const dynamicImport = /\bimport\s*\(/;
+    const offenders: string[] = [];
+
+    for (const id of reached) {
+      if (!id.endsWith(".ts")) continue;
+      if (id.startsWith("src/astro/sweph/")) continue;
+      const source = readSource(id);
+      if (source === null) continue;
+      if (dynamicImport.test(source)) offenders.push(chainTo(id, importerOf));
+    }
+
+    expect(
+      offenders,
+      [
+        "公開層から届くファイルで動的 import が使われています。",
+        "このテストの依存グラフは静的な import しか追えないので、動的 import で書かれると",
+        "境界の約束（台帳・身元・鍵つきツールに道が無いこと）を機械が確かめられなくなります。",
+        "見つかったファイル:",
+        ...offenders.map((chain) => `  ${chain}`),
+      ].join("\n"),
+    ).toEqual([]);
   });
 
   it("台帳・身元・鍵つきツールには、公開入口からたどり着けない", () => {

@@ -1130,3 +1130,144 @@ describe("公開層の連打の見張り（MCP_RATE_LIMIT）", () => {
     expect(keys).toEqual([]);
   });
 });
+
+/**
+ * 重いツール（reverse_horoscope）だけの 2 枚目の見張り。2026-08-27 再査読対応（I-4）。
+ *
+ * 上の `MCP_RATE_LIMIT`（1 分 60 回）を通ったあと、**本文が reverse_horoscope の tools/call の
+ * ときだけ**もう 1 枚引く。本文は 1 度しか読めないので、入口が読んだものを後段のハンドラへ
+ * 渡す配線になっている ―― その配線が壊れていないこと（ほかのツールが今までどおり動くこと）も
+ * ここで一緒に見る。
+ */
+describe("重いツール専用の見張り（REVERSE_RATE_LIMIT）", () => {
+  const REVERSE_CALL = {
+    jsonrpc: "2.0",
+    id: 9,
+    method: "tools/call",
+    params: {
+      name: "reverse_horoscope",
+      arguments: {
+        conditions: [{ body: "sun", sign: "aries" }],
+        year_from: 2000,
+        year_to: 2000,
+      },
+    },
+  };
+  const DRAW_CALL = {
+    jsonrpc: "2.0",
+    id: 10,
+    method: "tools/call",
+    params: { name: "draw_cards", arguments: { deck: "sky" } },
+  };
+
+  function fakeLimiter(success: boolean): { limiter: RateLimit; keys: string[] } {
+    const keys: string[] = [];
+    const limiter = {
+      async limit(options: { key: string }) {
+        keys.push(options.key);
+        return { success };
+      },
+    } as unknown as RateLimit;
+    return { limiter, keys };
+  }
+
+  function brokenLimiter(): RateLimit {
+    return {
+      async limit() {
+        throw new Error("limiter down");
+      },
+    } as unknown as RateLimit;
+  }
+
+  async function post(
+    body: unknown,
+    env: Parameters<typeof worker.fetch>[1],
+    ip = "203.0.113.9",
+  ): Promise<Response> {
+    return worker.fetch(
+      new Request(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": ip },
+        body: JSON.stringify(body),
+      }),
+      env,
+    );
+  }
+
+  it("reverse_horoscope のときだけ引く（超えていれば 429・IP は書かない）", async () => {
+    const { limiter, keys } = fakeLimiter(false);
+    const response = await post(REVERSE_CALL, { REVERSE_RATE_LIMIT: limiter } as any);
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("60");
+    const text = await response.text();
+    expect(text).toContain("呼び出しが多すぎます");
+    expect(text).not.toContain("203.0.113.9");
+    expect(keys).toEqual(["203.0.113.9"]);
+  });
+
+  it("ほかのツールと ping は引かない（本文もちゃんと後段に届く）", async () => {
+    const { limiter, keys } = fakeLimiter(false);
+    const env = { REVERSE_RATE_LIMIT: limiter } as any;
+
+    const drawn = await post(DRAW_CALL, env);
+    expect(drawn.status).toBe(200);
+    const json = (await drawn.json()) as any;
+    expect(json.result.structuredContent.cards).toHaveLength(1);
+
+    const pinged = await post({ jsonrpc: "2.0", id: 11, method: "ping" }, env);
+    expect(pinged.status).toBe(200);
+
+    expect(keys).toEqual([]);
+  });
+
+  it("通れば今までどおり後段へ（テスト環境ではエンジンが無いので isError で返る）", async () => {
+    const { limiter, keys } = fakeLimiter(true);
+    const response = await post(REVERSE_CALL, { REVERSE_RATE_LIMIT: limiter } as any);
+    expect(response.status).toBe(200);
+    const json = (await response.json()) as any;
+    expect(json.result.isError).toBe(true);
+    expect(json.result.content[0].text).toContain("天体計算エンジン");
+    expect(keys).toEqual(["203.0.113.9"]);
+  });
+
+  it("見張り自体が失敗したら断る（fail-closed。上の 60 回/分とは向きが逆）", async () => {
+    const response = await post(REVERSE_CALL, { REVERSE_RATE_LIMIT: brokenLimiter() } as any);
+    expect(response.status).toBe(429);
+
+    // 同じ壊れ方でも、1 分 60 回のほう（可用性優先）は今までどおり素通し
+    const other = await post(DRAW_CALL, { MCP_RATE_LIMIT: brokenLimiter() } as any);
+    expect(other.status).toBe(200);
+  });
+
+  it("バインディングが無ければ素通し（テスト・古い設定）", async () => {
+    const response = await post(REVERSE_CALL, undefined);
+    expect(response.status).toBe(200);
+  });
+
+  it("1 分 60 回のほうが先に断る（重いツールの見張りは引かれない）", async () => {
+    const outer = fakeLimiter(false);
+    const inner = fakeLimiter(false);
+    const response = await post(REVERSE_CALL, {
+      MCP_RATE_LIMIT: outer.limiter,
+      REVERSE_RATE_LIMIT: inner.limiter,
+    } as any);
+    expect(response.status).toBe(429);
+    expect(outer.keys).toEqual(["203.0.113.9"]);
+    expect(inner.keys).toEqual([]);
+  });
+
+  it("壊れた JSON は見張りに触れず、今までどおりの断り方で返る", async () => {
+    const { limiter, keys } = fakeLimiter(false);
+    const response = await worker.fetch(
+      new Request(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{ではない",
+      }),
+      { REVERSE_RATE_LIMIT: limiter } as any,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("JSON を解析できませんでした");
+    expect(keys).toEqual([]);
+  });
+});

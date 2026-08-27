@@ -7,6 +7,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleAstroMcpRequest, type AstroContext } from "../src/astro/astro-mcp";
+import { PLANETS } from "../src/astro/chart";
 import type { AuthContext, StoredChart } from "../src/astro/store";
 import { FakeKv } from "./stubs/fake-kv";
 import {
@@ -91,6 +92,15 @@ async function saveTwo(overridesB: Record<string, unknown> = {}): Promise<[strin
 }
 
 /**
+ * 台帳へ直に置くチャートの天体（chart.ts の PLANETS ＝ 11 天体）。
+ * `parseStoredChart` は件数と ID の集合がちょうど一致することを見るので、
+ * 手書きの「1 天体だけ」のレコードはもう通らない（2026-08-27 査読 I-2）。
+ */
+function storedPlanets(): { id: number; lon: number; speed: number }[] {
+  return PLANETS.map((planet, index) => ({ id: planet.id, lon: (index * 30) % 360, speed: 1 }));
+}
+
+/**
  * ラベルの無いチャートを台帳へ直接置く。
  *
  * save_chart は空のラベルを受け付けないので手で作る（見出しの「label が無ければ
@@ -100,7 +110,7 @@ function putLabellessChart(chartId = "nolabel1", user = "user1"): string {
   const stored: StoredChart = {
     label: "",
     house_system: "P",
-    planets: [{ id: 0, lon: 0, speed: 1 }],
+    planets: storedPlanets(),
     cusps: [...FAKE_CUSPS],
     ascmc: [...FAKE_ASCMC],
     created: "2026-08-01T00:00:00.000Z",

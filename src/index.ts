@@ -20,7 +20,7 @@
  * `worker` を named export にしてあるのは、OAuth 面（`cloudflare:workers` を読むため Node では
  * 動かない）に触らずにこのルーターだけをテストから叩けるようにするためです。
  */
-import { CORS_HEADERS, handleMcpRequest, jsonResponse } from "./mcp";
+import { CORS_HEADERS, handleMcpRequest, jsonResponse, peekToolName, readRequestBody } from "./mcp";
 import { internalFailureMessage } from "./internal-error";
 import { getEngine } from "./astro/engine";
 
@@ -34,6 +34,13 @@ export interface Env {
    * テスト（env なし）では見張りが居ないので素通し。
    */
   MCP_RATE_LIMIT?: RateLimit;
+  /**
+   * いちばん重いツール（`reverse_horoscope`）専用の見張り（同じく wrangler.jsonc の `ratelimits`）。
+   * 上の 1 分 60 回とは別枠で、こちらは 1 分 6 回。重い形（required 1 本 × 10 年）は 1 回で
+   * Workers 実機 0.2〜0.5 秒の CPU を食うので、60 回ぶん通すと 1 人で 1 分ぶんの予算を使い切れてしまう。
+   * **この見張りだけは失敗したら断る**（fail-closed。理由は `isHeavyToolRateLimited` の項）。
+   */
+  REVERSE_RATE_LIMIT?: RateLimit;
 }
 
 /**
@@ -109,6 +116,30 @@ async function isRateLimited(request: Request, env: MaybeEnv): Promise<boolean> 
   }
 }
 
+/** 専用の見張りを付けてある重いツール（1 本だけ。増えたらここに足す） */
+const HEAVY_TOOL_NAME = "reverse_horoscope";
+
+/**
+ * 重いツール専用の見張り。上の `isRateLimited` と違い、**見張りが失敗したら通さない**
+ * （fail-closed）。
+ *
+ * 素通しにしないのは、こちらが守っているのが「可用性」ではなく「1 リクエストの CPU」だから
+ * ―― 見張りが落ちている間に重い形を連打されると、Worker の予算のほうが先に尽きる。
+ * バインディングが**そもそも無い**とき（テスト・古い設定）は今までどおり素通し
+ * ＝「壊れた見張り」と「置いていない見張り」を区別する。鍵になる IP は返事にもログにも書かない。
+ */
+async function isHeavyToolRateLimited(request: Request, env: MaybeEnv): Promise<boolean> {
+  const limiter = env?.REVERSE_RATE_LIMIT;
+  if (!limiter) return false;
+  const key = request.headers.get("cf-connecting-ip") ?? "unknown";
+  try {
+    const outcome = await limiter.limit({ key });
+    return !outcome.success;
+  } catch {
+    return true;
+  }
+}
+
 /** 連打を断る返事（JSON-RPC の形で 429。送信元の情報は書かない） */
 function tooManyRequests(): Response {
   return jsonResponse(
@@ -138,8 +169,19 @@ export const worker = {
       if (url.pathname === "/mcp") {
         if (request.method === "POST") {
           if (await isRateLimited(request, _env)) return tooManyRequests();
+          // 本文は 1 度しか読めないので、ここで読んで**そのまま後段へ渡す**
+          // （読むのは大きさの見張りつきの共通部分＝mcp.ts。大きすぎる本文はここで断られる）
+          const body = await readRequestBody(request);
+          if (!body.ok) return body.response;
+          // 重いツールだけは専用の見張りをもう 1 枚。名前を覗くだけで、中身には触らない
+          if (
+            peekToolName(body.text) === HEAVY_TOOL_NAME &&
+            (await isHeavyToolRateLimited(request, _env))
+          ) {
+            return tooManyRequests();
+          }
           // getEngine は納甲（cast_hexagram の nakko: true）だけが使う。占星術層と同じもの
-          return await handleMcpRequest(request, { getEngine });
+          return await handleMcpRequest(request, { getEngine }, body.text);
         }
         return methodNotAllowed();
       }

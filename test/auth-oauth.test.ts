@@ -412,6 +412,44 @@ describe("defaultHandler", () => {
     expect(text).toContain("PKCE");
   });
 
+  // 2026-08-27 再査読対応: 「name が合っているだけ」の投げものに、OAuth の作法を貸さない
+  it("/authorize: Error でないただのオブジェクトは AuthorizationError 扱いしない", async () => {
+    const impostor = {
+      name: "AuthorizationError",
+      code: "invalid_request",
+      description: "なりすまし",
+      redirectUri: "http://localhost:9999/cb",
+    };
+    // 302 のリダイレクトにはならず、そのまま投げ直される（＝上の 500 の道へ）
+    await expect(
+      through("/authorize", null, "GET", {
+        OAUTH_PROVIDER: {
+          parseAuthRequest: async () => {
+            throw impostor;
+          },
+        },
+      }),
+    ).rejects.toBe(impostor);
+  });
+
+  // 2026-08-27 再査読対応: redirectUri が http/https の URL として読めないときは飛ばさない
+  it("/authorize: 飛べない redirect_uri（別スキーム・URL でない）は手元で 400", async () => {
+    for (const redirectUri of ["javascript:alert(1)", "not a url", "data:text/html,x", "/cb"]) {
+      const { response, text } = await through("/authorize", null, "GET", {
+        OAUTH_PROVIDER: {
+          parseAuthRequest: async () => {
+            throw authorizationError({ redirectUri, state: "s1" });
+          },
+        },
+      });
+      expect(response.status, `${redirectUri} は 400 で断る`).toBe(400);
+      expect(response.headers.get("Location")).toBeNull();
+      expect(text).toContain("invalid_request");
+      // 渡された URL そのものは書き写さない
+      expect(text).not.toContain(redirectUri);
+    }
+  });
+
   it("/authorize: AuthorizationError 以外の例外は握りつぶさない", async () => {
     await expect(
       through("/authorize", null, "GET", {

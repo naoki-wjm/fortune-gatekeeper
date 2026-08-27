@@ -24,7 +24,15 @@
  *    後ろの天体の天体計算はそのぶんだけになる。
  *
  * ⚠ サンプルの刻みより短い「行って戻る」（星座の境のすぐ内側で留になる形）は取りこぼしうる。
- *    留が境から 0.01° 以内という珍しい配置でしか起きないが、原理として残る穴なので書いておく。
+ *    拾えるかどうかを決めているのは**補間の上を歩く刻み**（`FINE_TICKS_PER_STEP` ＝ サンプルの 1/24
+ *    ＝水星〜火星で 1 時間・木星〜冥王星で 4 時間）で、それより短い出入りは格子の目をすり抜けうる
+ *    （太陽と月は一発計算なのでこの穴は無い）。この穴は黙っていないで**返り値と説明文にも書く**
+ *    ―― `REVERSE_LIMITATIONS`（conventions.limitations）とテキストの ⚠ 行が正文。2026-08-27 査読対応。
+ *
+ *    実物での当たり: 1800〜2200 年に「星座の境のすぐ内側で留になる」形は実際にあり、いちばん浅いのは
+ *    1970-01-04 の水星（水瓶座に 0.0024° だけ入って戻る＝**7.65 時間**）。1 時間の格子には十分かかる
+ *    ので実測でも拾えている（test/reverse-horoscope-real.test.ts）。穴に落ちるには留が境から
+ *    3e-5° 以内という、この 400 年には 1 度も無い浅さが要る ―― 原理として残るだけの穴、という位置づけ。
  */
 import {
   AstroError,
@@ -106,6 +114,17 @@ export const REVERSE_MAX_YEAR = 2200;
 
 /** 一度に見られる年数（両端を含む暦年の本数） */
 export const REVERSE_MAX_SPAN_YEARS = 30;
+
+/**
+ * required が **1 本だけ**のときに一度に見られる年数。
+ *
+ * 条件が 1 本しかないと「前の条件で残った区間の内側だけを次の天体で見る」という絞りが効かず、
+ * 範囲まるごとを疎サンプルで舐めることになる ―― 実測でいちばん重いのがこの形
+ * （水星だけ・30 年で天体計算 4,445 回・手元の Node で 251ms＝Workers 実機なら 0.5〜1.3 秒）。
+ * 10 年で切ると 1,859 回・101ms（Workers 実機で 0.2〜0.5 秒）まで下がる。
+ * 認証の無い入口に置く以上、いちばん重い形は短く切っておく。2026-08-27 査読対応。
+ */
+export const REVERSE_MAX_SPAN_YEARS_SINGLE = 10;
 
 /** 条件の本数の上限（10 天体しかないので、これ以上は必ず重複） */
 const MAX_CONDITIONS = REVERSE_BODIES.length;
@@ -210,6 +229,38 @@ export interface ReverseCandidate {
   positions: ReversePosition[];
 }
 
+/** 分かっている取りこぼし（英語の短い名前＋日本語の説明文。conventions.limitations に入る） */
+export interface ReverseLimitation {
+  name: string;
+  note: string;
+}
+
+/**
+ * この探し方に残っている穴。**黙っていないで返り値に載せる**ためのもの（2026-08-27 査読対応）。
+ *
+ * 数字（1 時間・4 時間）はサンプルの刻み ÷ `FINE_TICKS_PER_STEP` そのもの
+ * ―― 水星〜火星は 1 日 ÷ 24、木星〜冥王星は 4 日 ÷ 24。刻みを変えたらここも直すこと。
+ */
+export const REVERSE_LIMITATIONS: readonly ReverseLimitation[] = [
+  {
+    name: "short_sign_reentry_near_station",
+    note:
+      "留が星座の境のすぐ内側で起きる短い出入りは拾えないことがあります" +
+      "（水星〜火星で 1 時間未満・木星〜冥王星で 4 時間未満）。" +
+      "太陽と月は通過の一発計算なので、この穴はありません",
+  },
+  {
+    name: "no_candidates_is_not_proof",
+    note: "候補なし＝必ず該当なし、ではありません（上の取りこぼしのぶん）",
+  },
+];
+
+/** テキストの「規約:」行の次に出す 1 行（正文は REVERSE_LIMITATIONS と同じ中身） */
+const APPROXIMATION_NOTE =
+  "⚠ 近似探索です——留が星座の境のすぐ内側で起きる短い出入り" +
+  "（水星〜火星で 1 時間未満・木星〜冥王星で 4 時間未満）は拾えないことがあります。" +
+  "候補なし＝必ず該当なし、ではありません";
+
 export interface ReverseConventions {
   zodiac: "tropical";
   ephemeris: "moshier";
@@ -220,6 +271,8 @@ export interface ReverseConventions {
   other_bodies: "sparse_samples_with_cubic_hermite";
   positions_at: "local_noon";
   utc_offset: number;
+  /** 分かっている取りこぼし（`REVERSE_LIMITATIONS`） */
+  limitations: ReverseLimitation[];
 }
 
 export interface ReverseHoroscopeResult {
@@ -251,6 +304,22 @@ function bodyOf(key: string): (typeof REVERSE_BODIES)[number] | undefined {
   return REVERSE_BODIES.find((body) => body.key === key);
 }
 
+/** 断り文に相手の文字列を写すときの長さの上限（文字数） */
+const MAX_ECHO_CHARS = 80;
+
+/**
+ * 断り文に載せる「渡された名前」を切りそろえる。
+ *
+ * 綴り違いを黙って無視しないために相手の文字列を写して返しているが、認証の無い入口なので
+ * **写す量には蓋をしておく**（長い文字列をそのまま反射させない。2026-08-27 査読対応）。
+ * 切るのは**コードポイント単位**＝絵文字や漢字が真っ二つにならないように。
+ */
+function echoed(value: string): string {
+  const characters = Array.from(value);
+  if (characters.length <= MAX_ECHO_CHARS) return value;
+  return `${characters.slice(0, MAX_ECHO_CHARS).join("")}…`;
+}
+
 /** body の名前を読む。英語の小文字（sun / moon …）と日本語の天体名（太陽・月 …）の両方を受ける */
 export function parseReverseBody(raw: unknown): ReverseBodyKey {
   if (typeof raw !== "string") {
@@ -267,7 +336,7 @@ export function parseReverseBody(raw: unknown): ReverseBodyKey {
   if (byName) return byName.key;
 
   throw new AstroError(
-    `知らない天体です: ${trimmed}（使えるのは ${REVERSE_BODY_KEYS.join(" / ")}` +
+    `知らない天体です: ${echoed(trimmed)}（使えるのは ${REVERSE_BODY_KEYS.join(" / ")}` +
       "。ノードやアングルは条件に使えません）",
   );
 }
@@ -287,7 +356,7 @@ export function parseReverseSign(raw: unknown): number {
   if (english >= 0) return english;
 
   throw new AstroError(
-    `知らない星座です: ${trimmed}（使えるのは ${SIGNS.join(" / ")}` +
+    `知らない星座です: ${echoed(trimmed)}（使えるのは ${SIGNS.join(" / ")}` +
       ` または ${SIGN_KEYS.join(" / ")}）`,
   );
 }
@@ -298,7 +367,7 @@ function parseYear(args: Record<string, unknown>, key: string): number {
     throw new AstroError(`${key} は必須です（西暦の整数。year_from と year_to の両方を指定してください）`);
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new AstroError(`${key} は西暦の整数で指定してください: ${JSON.stringify(value)}`);
+    throw new AstroError(`${key} は西暦の整数で指定してください: ${echoed(JSON.stringify(value))}`);
   }
   if (value < REVERSE_MIN_YEAR || value > REVERSE_MAX_YEAR) {
     throw new AstroError(
@@ -319,7 +388,7 @@ function parseCondition(raw: unknown, index: number): ReverseCondition {
   const strays = Object.keys(entry).filter((key) => !["body", "sign", "priority"].includes(key));
   if (strays.length > 0) {
     throw new AstroError(
-      `conditions[${index}] に未知のキーがあります: ${strays.join(", ")}（使えるのは body / sign / priority）`,
+      `conditions[${index}] に未知のキーがあります: ${echoed(strays.join(", "))}（使えるのは body / sign / priority）`,
     );
   }
 
@@ -332,7 +401,7 @@ function parseCondition(raw: unknown, index: number): ReverseCondition {
     ) {
       throw new AstroError(
         `conditions[${index}].priority は ${REVERSE_PRIORITIES.join(" / ")} のどちらかで指定してください: ` +
-          String(rawPriority),
+          echoed(String(rawPriority)),
       );
     }
     priority = rawPriority as ReversePriority;
@@ -377,7 +446,8 @@ export function parseReverseHoroscopeArguments(raw: unknown): ReverseHoroscopeRe
     conditions.push(condition);
   }
 
-  if (!conditions.some((condition) => condition.priority === "required")) {
+  const requiredCount = conditions.filter((condition) => condition.priority === "required").length;
+  if (requiredCount === 0) {
     throw new AstroError(
       "required の条件が 1 本もありません（optional は候補日を決めないので、" +
         "少なくとも 1 本は required にしてください）",
@@ -394,6 +464,15 @@ export function parseReverseHoroscopeArguments(raw: unknown): ReverseHoroscopeRe
     throw new AstroError(
       `一度に見られるのは ${REVERSE_MAX_SPAN_YEARS} 年ぶんまでです（指定: ${years} 年）。` +
         "範囲を分けて呼んでください。",
+    );
+  }
+  // required が 1 本だけの形は絞りが効かず、いちばん重い（REVERSE_MAX_SPAN_YEARS_SINGLE の項）。
+  // 断り文は固定文＋数字だけ（渡された文字列は 1 つも写さない）
+  if (requiredCount === 1 && years > REVERSE_MAX_SPAN_YEARS_SINGLE) {
+    throw new AstroError(
+      `required の条件が 1 本だけのときは ${REVERSE_MAX_SPAN_YEARS_SINGLE} 年ぶんまでです` +
+        `（指定: ${years} 年）。required をもう 1 本足すと ${REVERSE_MAX_SPAN_YEARS} 年ぶんまで見られます` +
+        "（条件が増えるほど探索は軽くなります）。範囲を分けて呼んでも構いません。",
     );
   }
 
@@ -812,6 +891,8 @@ export function buildReverseHoroscope(
       other_bodies: "sparse_samples_with_cubic_hermite",
       positions_at: "local_noon",
       utc_offset: utcOffset,
+      // 分かっている取りこぼしも規約と一緒に返す（読む側が「候補なし」を早合点しないように）
+      limitations: REVERSE_LIMITATIONS.map((limitation) => ({ ...limitation })),
     },
   };
 }
@@ -884,6 +965,8 @@ export function formatReverseHoroscopeText(result: ReverseHoroscopeResult): stri
       "太陽と月の窓は swe_solcross_ut・swe_mooncross_ut の一発計算、" +
       "ほかの天体は疎サンプル＋3 次エルミート補間／" +
       "「正午の空」はその日の現地正午の星座（R＝逆行）で、条件が成り立つ時刻とは別ものです",
+    // 規約の次に、分かっている取りこぼしを 1 行（conventions.limitations と同じ中身）
+    APPROXIMATION_NOTE,
   ];
   if (result.truncated) {
     footer.push(
