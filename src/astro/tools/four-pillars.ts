@@ -8,18 +8,15 @@
 import { toolError, type ToolResult } from "../../mcp";
 import {
   FourPillarsError,
-  SOLAR_TERMS,
-  calculateDateFortune,
   calculateFourPillars,
   formatDateFortuneText,
   formatFourPillarsText,
   orderedPillars,
-  solarTermSpanFromJd,
   type DateFortuneResult,
   type FourPillarsResult,
-  type SolarTermSpan,
 } from "../../four-pillars";
-import { momentFromDate, monthBranchOrder, sunLongitude, type NakkoMoment } from "../../nakko";
+import { computeDateFortune, computeFourPillarsNatal } from "../four-pillars-engine";
+import { momentFromDate, sunLongitude, type NakkoMoment } from "../../nakko";
 import {
   MAX_PARTIES,
   MIN_PARTIES,
@@ -42,7 +39,7 @@ import {
   formatUtcMoment,
   pad,
 } from "../calendar";
-import { AstroError, julianDay, type SwissEph } from "../chart";
+import { AstroError } from "../chart";
 import {
   engineOf,
   missingPartyChart,
@@ -56,7 +53,6 @@ import {
   PRINCIPLE_NO_SUMMING,
   READ_WITH_YOUR_OWN_KNOWLEDGE,
 } from "../../phrases";
-import { crossUt } from "../returns";
 import { getChart, type StoredChart } from "../store";
 import { argsOf, optionalNumber, optionalString, requireChartIds } from "../tool-args";
 
@@ -70,66 +66,6 @@ const FOUR_PILLARS_BIRTH_OPTIONS: BirthMomentOptions = {
   yearMin: 1,
   yearMax: 9999,
 };
-
-/**
- * 節入り探索の遡り幅（日）。
- *
- * 節の帯（節入りから次の節入り）は太陽が 30° 進む時間＝ 29〜32 日なので、
- * 40 日戻れば「直前の節入り」が必ず 1 本だけ窓に入る（1 年前の同じ節はもっとずっと手前）。
- */
-const TERM_LOOKBACK_DAYS = 40;
-
-/**
- * 節の帯として辻褄が合う長さ（日）。
- *
- * 実際は 29〜32 日（近日点まわりの冬が短く、遠日点まわりの夏が長い。
- * `test/four-pillars-real.test.ts` が本物の wasm で毎回確かめている）。
- * ここは「壊れた答えを弾く網」なので、実測の外側に少し余裕を持たせてある。
- */
-const TERM_SPAN_MIN_DAYS = 28;
-const TERM_SPAN_MAX_DAYS = 33;
-
-/** 浮動小数の埃ぶんだけ「節入りちょうどの生まれ」を許す幅（日）＝ 0.1 秒 */
-const TERM_EPSILON_DAYS = 1e-6;
-
-/**
- * 出生の瞬間を挟む 2 本の節入りから、節の帯の中の位置（＝大運の起運のもと）を出す。
- *
- * 太陽黄経 30° ごとの境をそのまま探すので、暦の節入り表は引かない。
- * ⚠ `swe_solcross_ut` は wrapper のエラーチェックが壊れている（returns.ts の crossUt 参照）。
- *    crossUt が「開始 jd より後か」を見たうえで、ここでも**帯の形**を検算する
- *    ―― 前の節入り ≦ 出生 ＜ 次の節入り、帯の長さが節らしいか、の 2 つ。
- */
-function solarTermSpanAt(swe: SwissEph, birthJd: number, sunLon: number): SolarTermSpan {
-  const order = monthBranchOrder(sunLon);
-  const previousTerm = SOLAR_TERMS[order] as (typeof SOLAR_TERMS)[number];
-  const nextTerm = SOLAR_TERMS[(order + 1) % 12] as (typeof SOLAR_TERMS)[number];
-
-  const nextJd = crossUt(swe, "sun", nextTerm.longitude, birthJd);
-  const previousJd = crossUt(swe, "sun", previousTerm.longitude, birthJd - TERM_LOOKBACK_DAYS);
-
-  const span = nextJd - previousJd;
-  if (
-    previousJd > birthJd + TERM_EPSILON_DAYS ||
-    nextJd <= birthJd ||
-    span < TERM_SPAN_MIN_DAYS ||
-    span > TERM_SPAN_MAX_DAYS
-  ) {
-    // 断り文に jd を出さない（出生の瞬間そのものなので）
-    throw new AstroError(
-      "節入り（月柱の境）を計算できませんでした" +
-        "（天体計算が節の帯として辻褄の合う答えを返しませんでした）。" +
-        "しばらく置いてからもう一度呼んでください。",
-    );
-  }
-
-  const raw = solarTermSpanFromJd(birthJd, previousJd, nextJd);
-  // 節入りちょうどの生まれで −1e-12 のような値になるのを均す（純関数は 0 以上しか受けない）
-  return {
-    days_since_previous: Math.max(0, raw.days_since_previous),
-    days_until_next: raw.days_until_next,
-  };
-}
 
 const FOUR_PILLARS_NO_READING_NOTE = noReadingNote("通変星・十二運・蔵干・空亡・大運の意味");
 
@@ -159,13 +95,10 @@ async function runFourPillars(rawArguments: unknown, context: AstroContext): Pro
 
   // MomentInput と NakkoMoment は同じ形（現地の時計の読み＋時差）
   const birthMoment: NakkoMoment = resolved.moment;
-  const birthJd = julianDay(swe, birthMoment);
-  const birthSunLon = sunLongitude(swe, birthMoment);
-  const term = solarTermSpanAt(swe, birthJd, birthSunLon);
 
   let natal: FourPillarsResult;
   try {
-    natal = calculateFourPillars({ moment: birthMoment, sun_longitude: birthSunLon, term });
+    natal = computeFourPillarsNatal(swe, birthMoment);
   } catch (error) {
     // 純関数の言い分には出生データの値が混じり得るので、そのままは返さない
     if (error instanceof FourPillarsError) {
@@ -179,15 +112,10 @@ async function runFourPillars(rawArguments: unknown, context: AstroContext): Pro
 
   // 対象日は「その土地の時計の読み」で見る（日運の日界 0 時も時運の 2 時間区切りもここで決まる）
   const targetMoment = momentFromDate(day.at, dateOffset);
-  const targetSunLon = sunLongitude(swe, targetMoment);
 
   let fortune: DateFortuneResult;
   try {
-    fortune = calculateDateFortune(natal, {
-      moment: targetMoment,
-      sun_longitude: targetSunLon,
-      include_hour: day.hasTime,
-    });
+    fortune = computeDateFortune(swe, natal, targetMoment, day.hasTime);
   } catch (error) {
     // こちらの言い分に出るのは**呼び出した側が打った日付**なので、そのまま返してよい
     if (error instanceof FourPillarsError) throw new AstroError(error.message);

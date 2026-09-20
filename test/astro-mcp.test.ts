@@ -11,6 +11,7 @@ import {
 } from "../src/astro/store";
 import { calculateNumerology } from "../src/numerology";
 import { calculateFourPillars, type FourPillarsResult } from "../src/four-pillars";
+import { SABIAN_CONVENTION } from "../src/sabian";
 import type { RandomSource } from "../src/random";
 import { FakeKv } from "./stubs/fake-kv";
 import { FROZEN_CARD_TOOLS } from "./stubs/frozen-card-tools";
@@ -616,7 +617,11 @@ describe("get_chart", () => {
     // 止まった図なので接近・離反は書かない。ノードはアスペクトに出さない
     expect(text).not.toContain("接近");
     expect(text).not.toContain("離反");
-    const aspectSection = text.slice(text.indexOf("■ ネイタル内アスペクト"));
+    // 後ろにサビアン度数の節（ノードも並ぶ）が続くので、見るのはアスペクトの節だけに区切る
+    const aspectSection = text.slice(
+      text.indexOf("■ ネイタル内アスペクト"),
+      text.indexOf("■ サビアン度数"),
+    );
     expect(aspectSection).not.toContain("Nノード");
 
     const structured = result.structuredContent;
@@ -639,6 +644,46 @@ describe("get_chart", () => {
     expect(text).not.toContain("35.6895");
     expect(Object.keys(structured)).not.toContain("birth");
     expect(JSON.stringify(structured)).not.toContain("139.6917");
+  });
+
+  it("サビアン度数の節を添える（切り上げ＝0 度は無い。シンボルの文言は載せない）", async () => {
+    // 偽エンジンを 14.5° ずらして保存すると、太陽 14.5° / 月 44.5° の図になる
+    // ―― 星座の頭ちょうどではない度数で「切り上げて 15 度」になることを確かめられる
+    engine.offset = 14.5;
+    const chartId = await saveDefaultChart();
+
+    const result = await call("get_chart", { chart_id: chartId });
+    expect(result.isError).toBeUndefined();
+
+    const text: string = result.content[0].text;
+    // 足すのはネイタル内アスペクトの節の後ろ（空行を 1 つ挟む）
+    expect(text).toContain("\n\n■ サビアン度数");
+    expect(text.indexOf("■ サビアン度数")).toBeGreaterThan(text.indexOf("■ ネイタル内アスペクト"));
+
+    const sabianSection = text.slice(text.indexOf("■ サビアン度数")).split("\n");
+    // 見出し＋11 天体（PLANETS の並びどおり・Nノードも）＋ ASC / MC の 1 行
+    expect(sabianSection).toHaveLength(13);
+    expect(sabianSection[0]).toBe(
+      "■ サビアン度数（切り上げ＝0°00′〜0°59′ が 1 度。シンボルの文言は載せていないので、読む側の知識で）",
+    );
+    // 規約の文言は sabian.ts の 1 か所から借りている（二重に持たない）
+    expect(sabianSection[0]).toContain(SABIAN_CONVENTION.rounding_label);
+    expect(sabianSection[1]).toBe("太陽 牡羊座 15 度（通し 15）");
+    expect(sabianSection[2]).toBe("月 牡牛座 15 度（通し 45）");
+    expect(sabianSection[11]).toBe("Nノード 魚座 15 度（通し 345）");
+    expect(sabianSection[12]).toBe("ASC 蟹座 1 度（通し 91） / MC 水瓶座 1 度（通し 301）");
+    // 普段の度数表示（切り捨て・分つき）は今までどおり別の節に残る＝1 ずれて見えるのは規約のせい
+    expect(text).toContain("太陽 牡羊座 14°30′");
+
+    const structured = result.structuredContent;
+    // sign_index と label は載せない（テキストに出ている情報だけ）
+    expect(structured.planets[0].sabian).toEqual({ sign: "牡羊座", degree: 15, serial: 15 });
+    expect(structured.planets[1].sabian).toEqual({ sign: "牡牛座", degree: 15, serial: 45 });
+    expect(structured.angles_sabian).toEqual({
+      asc: { sign: "蟹座", degree: 1, serial: 91 },
+      mc: { sign: "水瓶座", degree: 1, serial: 301 },
+    });
+    expect(structured.sabian_convention).toBe(SABIAN_CONVENTION.rounding_label);
   });
 
   it("いつもの場所があれば見出しに添える", async () => {

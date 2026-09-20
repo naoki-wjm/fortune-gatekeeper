@@ -32,6 +32,7 @@ import {
   type AstroTool,
 } from "../context";
 import { missingChartMessage } from "../../phrases";
+import { SABIAN_CONVENTION, sabianDegreeOf } from "../../sabian";
 import {
   createChart,
   deleteChart,
@@ -211,11 +212,38 @@ async function runListCharts(context: AstroContext): Promise<ToolResult> {
 }
 
 /**
+ * サビアン度数の節の見出し。
+ *
+ * 規約の文言は `SABIAN_CONVENTION.rounding_label` から借ります ―― 同じことを二か所に書くと、
+ * いつか片方だけ直して「規約は切り上げだと言いながら別の数え方の説明が出る」ことになるためです。
+ */
+const SABIAN_SECTION_HEADING =
+  `■ サビアン度数（${SABIAN_CONVENTION.rounding_label}。` +
+  "シンボルの文言は載せていないので、読む側の知識で）";
+
+/** 「太陽 牡牛座 15 度（通し 45）」の 1 行（名前は天体でも ASC / MC でも同じ形） */
+function sabianLine(name: string, lon: number): string {
+  const sabian = sabianDegreeOf(lon);
+  return `${name} ${sabian.label}（通し ${sabian.serial}）`;
+}
+
+/**
+ * structuredContent に載せるサビアン度数。
+ *
+ * `sign_index` と `label` は落とします ―― どちらも sign / degree から作り直せる写しで、
+ * テキストに出ていない情報を structuredContent だけが持つ形にはしないためです。
+ */
+function sabianFields(lon: number): { sign: string; degree: number; serial: number } {
+  const { sign, degree, serial } = sabianDegreeOf(lon);
+  return { sign, degree, serial };
+}
+
+/**
  * 保存済みチャートの読み直し。
  *
  * 天体計算はしない ―― KV に入っている座標をそのまま整形するだけなので wasm を呼ばない
  * （engineOf も通らない）。save_chart の返り値では見えないもの、すなわち
- * **出生図の中のアスペクト**を足すのがこのツールの持ち場。
+ * **出生図の中のアスペクト**と**サビアン度数**を足すのがこのツールの持ち場。
  */
 async function runGetChart(rawArguments: unknown, context: AstroContext): Promise<ToolResult> {
   const args = argsOf(rawArguments);
@@ -259,6 +287,12 @@ async function runGetChart(rawArguments: unknown, context: AstroContext): Promis
   } else {
     lines.push(...aspects.map((hit) => formatNatalAspect(hit)));
   }
+  lines.push("");
+
+  // 黄経の言い換えなので計算は要らない（既に返している度数表示より粗い＝出生データの約束には触らない）
+  lines.push(SABIAN_SECTION_HEADING);
+  lines.push(...chart.planets.map((planet) => sabianLine(planetName(planet.id), planet.lon)));
+  lines.push(`${sabianLine("ASC", angles.asc)} / ${sabianLine("MC", angles.mc)}`);
 
   const structuredPlanets = chart.planets.map((planet: PlanetPosition) => ({
     id: planet.id,
@@ -268,6 +302,7 @@ async function runGetChart(rawArguments: unknown, context: AstroContext): Promis
     retrograde: planet.speed < 0,
     position: formatDegree(planet.lon),
     house: getHouse(planet.lon, chart.cusps),
+    sabian: sabianFields(planet.lon),
   }));
 
   return {
@@ -280,10 +315,13 @@ async function runGetChart(rawArguments: unknown, context: AstroContext): Promis
       ...(chart.default_location ? { default_location: chart.default_location } : {}),
       planets: structuredPlanets,
       angles,
+      angles_sabian: { asc: sabianFields(angles.asc), mc: sabianFields(angles.mc) },
       // 保存形は [0] がダミーなので、返すのは 1..12 の 12 要素だけ
       cusps: chart.cusps.slice(1, 13),
       orb,
       natal_aspects: aspects,
+      // 規約は名前で返す（鯖の憲法 第 2 条。どの数え方を採ったかが分かればサーバーを疑わずに読める）
+      sabian_convention: SABIAN_CONVENTION.rounding_label,
     },
   };
 }

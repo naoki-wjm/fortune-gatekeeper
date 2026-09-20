@@ -444,7 +444,7 @@ curl -i https://fortune-mcp.my-sky.blue/mcp/anything
 |---|---|
 | `save_chart` | 出生データからネイタルチャートを計算し `chart_id` を発行。**出生データも一緒に預かる**（返事には出さない） |
 | `list_charts` | 登録済みチャートの一覧（chart_id / ラベル / ハウス方式 / いつもの場所 / 出生データの有無 / 登録日時）。出生データは「あり・なし」だけで値は出さない |
-| `get_chart` | 登録済みの出生図を読み直す。天体の位置と在ハウス・ASC/MC・ハウスカスプに加えて**出生図の中のアスペクト**（10天体＋ASC/MC の総当たり、ノード除く）。保存済みの座標を整形するだけで計算はしない。`transit` が「今の空」なら、こちらは「生まれたときの空」 |
+| `get_chart` | 登録済みの出生図を読み直す。天体の位置と在ハウス・ASC/MC・ハウスカスプに加えて**出生図の中のアスペクト**（10天体＋ASC/MC の総当たり、ノード除く）。保存済みの座標を整形するだけで計算はしない。`transit` が「今の空」なら、こちらは「生まれたときの空」。**サビアン度数（切り上げ・文言なし）も添える** |
 | `delete_chart` | 登録の取り消し。計算済みの座標も預かっている出生データも一緒に消える（戻せない） |
 | `update_default_location` | 「いつもの場所」だけの差し替え（引っ越したとき）。出生データの再入力は不要で、保存済みの座標には触らない。`clear: true` で削除 |
 | `transit` | 指定時刻（省略時は現在）の天体・ネイタルのカスプで見た在ハウス・ネイタルへのアスペクト。加えて**空の中のアスペクト**（トランジット天体同士、`orb` で流派に合わせられる） |
@@ -872,6 +872,8 @@ ASC 天秤座 21°32′ / MC 蟹座 24°00′
 
 進行 ASC / MC はソーラーアークで動かした MC から ARMC を出し、`swe_houses_armc` で立てます（`astro-viewer` の `viewer/calc.js` の作法をそのまま移植）。
 
+サビアン度数（`get_chart` が添えるもの）は黄経の言い換えなので、天体計算は1回も増えません。規約は**切り上げ**ひとつだけ——0°00′〜0°59′ が1度、29°00′〜29°59′ が30度なので、同じ天体が普段の度数表示（`牡羊座 14°30′`）とサビアン（`牡羊座 15 度`）で1つずれて見えますが、ずれているのではなく**そういう数え方**です。**シンボルの文言は載せません**——サビアンは広く知られた体系なので、タロット・ルーン・宿曜と同じ線引きで度数の名前だけを返し、読みは受け取った側の知識に委ねます（日本語訳の文言そのものに権利の問題があるのも理由の1つ）。
+
 年間概要（`yearly_overview`）だけは1年ぶんを1日ずつ見る作りなので、素直に総当たりすると天体計算が約2,900回＝Workers Free の CPU 上限（10ms）を桁で超えます。そこで**日次の状態機械はそのままに、天体位置の供給源だけ**を差し替えました ―― 天体ごとに4〜16日おきの疎なサンプルを取り、3次ラグランジュ補間で日次表を組み立てます（速度は補間の導関数から出すので `SEFLG_SPEED` を付けずに済み、1回あたりの計算も軽くなります）。刻み幅は15年分（2016〜2030）を本物と突き合わせて天体別に決めたもので、補間誤差は 1e-3° 未満（Moshier 暦自身の精度と同じ桁）。天体計算は約355回で、同じ日付に当たる天体をまとめて呼ぶ（Swiss Ephemeris が地球の位置を使い回すので2天体目以降が半額になる）ため、刻み幅はすべて4日の倍数にそろえてあります。それでも Workers 実機の CPU は 15〜42ms（手元の Node の 2〜5 倍）だったので、このサーバーは Workers Paid で動かしています（`wrangler.jsonc` の `limits.cpu_ms`）。総当たり版との突き合わせは `test/astro-yearly-real.test.ts` が**本物の wasm を読んで**毎回検算しています。
 
 `transit_events` は同じ疎サンプル方式を**速度つき（3次エルミート補間）**にしたものです。速い天体（太陽・月・水星・金星・火星）は1日おき、木星〜冥王星は4日おきのサンプルから、10分刻み＋二分法で分単位の時刻を出します（本物を毎tick叩いた総当たりとの差は1分未満）。期間の上限は動く側の組で決まり（`all` 31日／`no_moon` 93日／`outer` 366日）、天体計算は14日・全天体で100回、93日・月なしで501回。当たりようのない枝（外惑星は1年でも数度しか動かない）は掃いた弧を見て丸ごと飛ばします。検算は `test/astro-events-real.test.ts`。
@@ -912,6 +914,7 @@ fortune-gatekeeper/
   src/numerology.ts     … 数秘術（4経路の還元規約・途中式・テキスト整形。乱数なし。呼ぶのは鍵つきの占星術層だけ）
   src/shukuyo.ts        … 宿曜（27宿の台帳・サイデリアル黄経から宿・三九の秘法・宿名のパース・テキスト整形。乱数なし、wasm にも触らない）
   src/four-pillars.ts   … 四柱推命（命式・通変星・十二運・蔵干・空亡・大運・流年／月運／日運。乱数なし、太陽黄経と節入りの日数は引数で受ける）
+  src/sabian.ts         … サビアン度数（黄経 → 「牡牛座 15 度」。切り上げ規約だけ・シンボルの文言は持たない。乱数なし・wasm にも触らない）
   src/decks.ts          … デッキ台帳（JSON を静的 import）
   src/spreads.ts        … スプレッド台帳
   src/random.ts         … 偏りのない乱数・シャッフル・重み付き抽選
@@ -924,6 +927,9 @@ fortune-gatekeeper/
   src/astro/returns.ts  … リターン（月・太陽）の一発計算と二次進行
   src/astro/yearly.ts   … 年間概要の走査（疎サンプル＋3次補間の日次表・純関数）
   src/astro/events.ts   … 期間内のイベント走査（疎サンプル＋3次エルミート補間・10分刻み・純関数）
+  src/astro/four-pillars-engine.ts … 四柱推命の天体グルー（jd・太陽黄経・節入りの帯 → 命式／日運）。MCP の科とブラウザの束ねが**同じここ**を呼ぶ
+  src/astro/kyusei-engine.ts       … 九星気学の天体グルー（太陽黄経で年界・月界、至を探して暦日へ、盤 3 枚）。同上
+  src/astro/shukuyo-engine.ts      … 宿曜の天体グルー（月のサイデリアル黄経 → 宿、境界の通過時刻）。同上
   src/astro/store.ts    … KV の台帳（許可台帳＝メールのハッシュ・チャート）
   src/astro/engine.ts   … Swiss Ephemeris の wasm を読む唯一の窓口
   src/astro/sweph/*     … sweph-wasm 一式（astro-viewer からの無改造コピー。手を入れない）
@@ -931,6 +937,9 @@ fortune-gatekeeper/
   src/auth/access-handler.ts   … Cloudflare Access (OIDC) との往復（門番 Worker からの複製。ID トークンの検証強化と、認可要求の不備を OAuth の作法で断る受けだけ足してある）
   src/auth/workers-oauth-utils.ts … 承認画面・CSRF・state（同上。無改造）
   src/auth/env.ts       … OAuth 面のバインディングの型（OAUTH_KV と Secret 6 本）
+  src/browser/index.ts  … ブラウザ用の束ねの入口（列挙だけ。エンジンは引数で受け、wasm も Workers の入口も読まない）
+  src/browser/paste-*.ts … 貼り付けテキスト（Astro Tool 様式。占術ごとに 1 枚＋共通部品 paste-common.ts）
+  scripts/build-browser.mjs … 束ねを作る（esbuild。`dist/browser/fortune-calc.js`）
   scripts/email-hash.mjs … メール → 台帳の鍵名に使うハッシュ（出すのはハッシュだけ）
   .dev.vars.example     … Secret 6 本の雛形（実データは .dev.vars か wrangler secret へ）
   test/*.test.ts        … vitest
@@ -945,6 +954,7 @@ npm install
 npm run sync:decks     # fortune-site からデッキを取り直す（素材の正本は向こう側）
 npm test               # vitest
 npm run type-check     # tsc --noEmit
+npm run build:browser  # ブラウザ用の束ね（dist/browser/fortune-calc.js）
 npm run dev            # wrangler dev（http://localhost:8789）
 npm run deploy         # wrangler deploy（Cloudflare Workers）
 npm run email-hash -- someone@example.com   # 許可台帳に載せるハッシュを出す（OAuth の口用）
@@ -970,6 +980,49 @@ curl -s http://localhost:8789/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cast_hexagram","arguments":{"method":"yarrow"}}}'
 ```
+
+## ブラウザ用の束ね（divination 向け）
+
+姉妹企画 **divination**（静的サイト）が、このリポの純関数を**ブラウザの中で直接動かして** LLM に貼るテキストを作れるようにしたものです。計算の正本はこのリポの 1 か所のままで、向こうには写しを置きません。
+
+```bash
+npm run build:browser   # → dist/browser/fortune-calc.js（＋ .js.map）
+```
+
+**天体計算（sweph-wasm）は束ねに含めません。** divination 側は Astro Tool（astro-viewer）と同じ `sweph-wasm.js` を自分で読み、`SwissEPH.init()` で得たエンジンをこちらの関数に渡します（同じ wasm が 2 つ載るのを避けるため）。入口が `src/astro/engine.ts` と `src/astro/sweph/**` を import しないことは `test/import-boundary.test.ts` が依存グラフで見張っています。
+
+最小の使い方:
+
+```js
+import * as calc from "./fortune-calc.js";
+
+// Astro Tool と同じ sweph-wasm を読んで初期化したもの（サイデリアルの基準点を Lahiri に固定して返る）
+const swe = calc.prepareEngine(await SwissEPH.init());
+
+const { result, text } = calc.pasteFourPillars(swe, {
+  year, month, day, hour, minute, utcOffset: 9,
+});
+console.log(text);   // そのまま LLM に貼れるテキスト
+console.log(result); // MCP の structuredContent と同じ形（純関数の返り値そのもの）
+```
+
+貼り付けテキストの様式は Astro Tool のコピー用テキストと同じで、
+
+```
+【四柱推命】1990-05-15 12:30 JST
+規約: 子平 / 日界 0 時 / 節気は太陽黄経 / 時刻の補正なし / 大運は順行・逆行の両方 / 月律分野表は採らない
+
+■ 四柱推命（命式）
+…
+```
+
+1 行目が `【種別】入力条件`、2 行目が `規約: …`（流派が割れるところを名前で。読む側が確かめられるように）、そのあとは 1 行 1 項目で、まとまりは `■ 節`。**既定は最小構成**（出生側だけ）で、対象日や相手を引数で渡したときだけ節が増えます。中身（何を出すか）は MCP の返事と揃えてあり、見た目だけ Astro Tool に合わせてある、という作りです。
+
+口は `pasteFourPillars` / `pasteKyusei` / `pasteShukuyo` / `pasteShukuyoCompat` / `pasteNumerology` / `pasteHexagram` / `pasteGeomancy` / `pasteDraw` / `pasteAstroDice` / `pasteSabian` の 10 本。純関数（`drawCards`・`calculateFourPillars` …）とグルー（`computeFourPillarsNatal` …）も同じ入口から出ているので、テキストを使わず自前で組み立てることもできます。
+
+**個人データはブラウザの中だけ**で完結します ―― 束ねはどこにも送信せず、保存もしません（MCP の「出生データを返事に出さない」約束は、預ける相手がいるサーバー側の話。こちらは利用者自身の入力なので、貼り付けテキストには値を書きます。貼るかどうかを決めるのも利用者です）。
+
+ライセンスはリポジトリ本体と同じ **AGPL-3.0-only** で、束ねの先頭にもその旨を書いた札が付きます。
 
 ## エンドポイント
 

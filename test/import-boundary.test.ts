@@ -18,6 +18,12 @@
  * 「この 1 本だけは許す」と足していく許可リスト方式にはしていません ――
  * 許可リストは足すたびに約束がゆるむ側に倒れるので、落ちたら配線のほうを直します。
  *
+ * **根は 2 本**あります。もう 1 本はブラウザ用の束ねの入口（`src/browser/index.ts`）で、
+ * こちらは上の 5 つに加えて **Workers の入口（`src/index.ts` / `src/mcp.ts` / `src/internal-error.ts`）と
+ * wasm（`src/astro/engine.ts` / `src/astro/sweph/`）** にも道を通しません ――
+ * 束ねに wasm が紛れ込むと同じ wasm が 2 つ載る（divination 側は Astro Tool と同じものを自分で読む）、
+ * Workers の入口が紛れ込むと `cloudflare:` を読む枝がブラウザに落ちてくる、の 2 つを止めるためです。
+ *
  * もう 1 本は AGENTS.md の「tools 同士は import しない」の固定。科どうしが横に
  * つながり始めると、入口の 1 行を読むだけでは何が載っているか分からなくなるためです。
  *
@@ -54,6 +60,41 @@ const EXPECTED_FILES = [
   "src/astro/chart.ts",
   "src/moon-calendar.ts",
   "src/reverse-horoscope.ts",
+];
+
+/** ブラウザ用の束ねの入口（2 本目の根。divination が読む 1 本の JS はここから作る） */
+const BROWSER_ENTRY = "src/browser/index.ts";
+
+/**
+ * 束ねに入ってはいけないファイル。公開層の 5 つに加えて、
+ * **Workers の入口**（`src/index.ts` / `src/mcp.ts` / `src/internal-error.ts`）も止める
+ * ―― ブラウザには JSON-RPC も Workers の例外の丸めも要らず、読むと `cloudflare:` を持つ枝へ道が通る。
+ */
+const BROWSER_FORBIDDEN_FILES = [
+  ...FORBIDDEN_FILES,
+  "src/astro/engine.ts",
+  "src/mcp.ts",
+  "src/index.ts",
+  "src/internal-error.ts",
+];
+
+/** 束ねに入ってはいけないフォルダ。wasm の複製（sweph/）は divination 側が自分で読む */
+const BROWSER_FORBIDDEN_DIRS = [...FORBIDDEN_DIRS, "src/astro/sweph/"];
+
+/**
+ * 束ねに「必ず入っているはず」のもの（空振り止め）。
+ * 占術ごとの純関数がひととおり届いていることを、名前を並べて確かめる。
+ */
+const BROWSER_EXPECTED_FILES = [
+  "src/four-pillars.ts",
+  "src/kyusei.ts",
+  "src/shukuyo.ts",
+  "src/numerology.ts",
+  "src/iching.ts",
+  "src/geomancy.ts",
+  "src/draw.ts",
+  "src/sabian.ts",
+  "src/astro/chart.ts",
 ];
 
 // ---------------------------------------------------------------------------
@@ -255,6 +296,65 @@ describe("公開層の import 境界", () => {
       [
         "公開層（認証なしの POST /mcp）から鍵つきの部品に道が通っています。",
         "借りてよいのは天体計算の純部品だけ（chart / calendar / events / returns / engine）です。",
+        "到達経路:",
+        ...trespassers.map((chain) => `  ${chain}`),
+      ].join("\n"),
+    ).toEqual([]);
+  });
+});
+
+describe("ブラウザ用の束ねの import 境界", () => {
+  const { reached, importerOf } = collectGraph(BROWSER_ENTRY);
+
+  it("正規表現が生きている（占術の純関数がひととおり拾えている）", () => {
+    for (const expected of BROWSER_EXPECTED_FILES) {
+      expect(Array.from(reached), `${expected} が依存グラフに見当たらない`).toContain(expected);
+    }
+  });
+
+  /**
+   * 公開層と同じ理由（依存グラフは静的な import しか追えない）で、束ねの中でも動的 import を禁じる。
+   * こちらはもう 1 つ実害があって、束ねた JS の中に動的 import が残ると
+   * divination 側が「1 本の JS を読むだけ」では済まなくなる。
+   */
+  it("束ねに入る自作ファイルは動的 import を使わない", () => {
+    const dynamicImport = /\bimport\s*\(/;
+    const offenders: string[] = [];
+
+    for (const id of reached) {
+      if (!id.endsWith(".ts")) continue;
+      const source = readSource(id);
+      if (source === null) continue;
+      if (dynamicImport.test(source)) offenders.push(chainTo(id, importerOf));
+    }
+
+    expect(
+      offenders,
+      [
+        "ブラウザ入口から届くファイルで動的 import が使われています。",
+        "束ねは 1 本の JS として配るので、動的 import が残ると読み込みが 1 回で済まなくなります。",
+        "見つかったファイル:",
+        ...offenders.map((chain) => `  ${chain}`),
+      ].join("\n"),
+    ).toEqual([]);
+  });
+
+  it("台帳・身元・鍵つきツール・Workers の入口・wasm には、束ねからたどり着けない", () => {
+    const trespassers: string[] = [];
+
+    for (const id of reached) {
+      const forbidden =
+        BROWSER_FORBIDDEN_FILES.includes(id) ||
+        BROWSER_FORBIDDEN_DIRS.some((dir) => id.startsWith(dir));
+      if (forbidden) trespassers.push(chainTo(id, importerOf));
+    }
+
+    expect(
+      trespassers,
+      [
+        "ブラウザ用の束ねに、載せてはいけない部品への道が通っています。",
+        "束ねてよいのは純関数と、エンジンを引数で受けるグルーだけです",
+        "（wasm は divination 側が Astro Tool と同じものを読み、swe を渡してきます）。",
         "到達経路:",
         ...trespassers.map((chain) => `  ${chain}`),
       ].join("\n"),

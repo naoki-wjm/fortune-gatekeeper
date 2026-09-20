@@ -3,6 +3,7 @@ node_modules/
 .dev.vars
 .env
 dist/
+vitest.log
 
 # 作業用ドキュメント（ローカル専用。公開リポには含めない）
 AGENTS.md
