@@ -30,6 +30,10 @@ export default new OAuthProvider({
   apiRoute: "/astro/mcp",
   authorizeEndpoint: "/authorize",
   clientRegistrationEndpoint: "/register",
+  // DCR で登録されたクライアント（claude.ai・ChatGPT・Grok・Claude Code・ローカルちゃん）は、既定だと 90 日で
+  // KV から消え、以後は「Invalid client_id」で OAuth が始まらなくなる（保管庫MCPで 2026-10-03 に発生）。
+  // undefined を明示すると無期限。登録の寿命は KV ではなく、コネクタの削除で管理する。
+  clientRegistrationTTL: undefined,
   defaultHandler: defaultHandler as any,
   tokenEndpoint: "/token",
 });
