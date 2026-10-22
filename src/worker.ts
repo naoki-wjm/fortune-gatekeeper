@@ -34,6 +34,10 @@ export default new OAuthProvider({
   // KV から消え、以後は「Invalid client_id」で OAuth が始まらなくなる（保管庫MCPで 2026-10-03 に発生）。
   // undefined を明示すると無期限。登録の寿命は KV ではなく、コネクタの削除で管理する。
   clientRegistrationTTL: undefined,
+  // グラント（リフレッシュトークン）も既定だと承認から 30 日の固定期限で、毎日使っていても延びずに
+  // KV から消える（2026-10-23 に claude.ai・Claude Code・Grok の 3 口が同時に切れた）。
+  // undefined を明示すると無期限。取り消しは KV の grant: レコード削除かコネクタ側の切断で行う。
+  refreshTokenTTL: undefined,
   defaultHandler: defaultHandler as any,
   tokenEndpoint: "/token",
 });
